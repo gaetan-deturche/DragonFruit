@@ -11,7 +11,7 @@ export interface CandidatePoint {
     /** The model this candidate belongs to. */
     modelId: string;
     /** Which detector produced this candidate. */
-    source: 'voxel' | 'minima' | 'intersection';
+    source: 'voxel' | 'minima' | 'intersection' | 'overhang';
     /** Max cross-sectional area of the unsupported region (mm²). 0 for minima-only. */
     islandAreaMm2: number;
     /** Z-height above build plate (mm). */

@@ -20,6 +20,7 @@ import { isShaftBlocked } from '../PlacementLogic/CollisionAvoidance';
 import { runAutoBracing } from '../autoBracing/autoBrace';
 import { pushHistory } from '@/history/historyStore';
 import { getModelMesh } from './meshStore';
+import { generateOverhangCandidates } from './overhangSampling';
 
 const LOG_PREFIX = '[AutoSupport]';
 
@@ -76,34 +77,66 @@ function resolveSurfaceNormal(
     }
 
     const raycaster = new THREE.Raycaster();
-    // Shoot a ray from slightly above the candidate toward it.
-    const origin = new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z + 2);
-    const direction = new THREE.Vector3(0, 0, -1);
-    raycaster.set(origin, direction);
 
-    // Also try shooting upward in case the surface faces down.
-    const hitsUp: THREE.Intersection[] = [];
+    // Downward ray from just above the candidate — catches up-facing surfaces.
+    raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z + 2), new THREE.Vector3(0, 0, -1));
+    const hitsDown = raycaster.intersectObject(mesh, false);
+
+    // Upward ray from just below the candidate — catches down-facing surfaces.
+    // NOTE: use a fresh intersect call; do NOT reuse the raycaster state for the
+    // down ray afterwards (the previous implementation clobbered the down ray).
     raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z - 2), new THREE.Vector3(0, 0, 1));
-    hitsUp.push(...raycaster.intersectObject(mesh, false));
+    const hitsUp = raycaster.intersectObject(mesh, false);
 
-    const hits = raycaster.intersectObject(mesh, false);
-    if (hits.length > 0) {
-        const hit = hits[0];
+    const down = hitsDown[0];
+    const up = hitsUp[0];
+
+    // Pick whichever surface is actually closest to the candidate tip in Z
+    // (both rays are vertical, so |hit.z - tip.z| is the true surface distance).
+    let useUp: boolean;
+    if (down && up) {
+        useUp = Math.abs(up.point.z - tipPos.z) <= Math.abs(down.point.z - tipPos.z);
+    } else {
+        useUp = !down;
+    }
+
+    const hit = useUp ? up : down;
+    if (hit) {
         const smoothed = calculateSmoothedNormal(hit);
+        // Down ray hits an up-facing surface → normal already points up/out.
+        // Up ray hits a down-facing surface → flip so the normal points down/out,
+        // toward the incoming support below.
+        const normal = useUp
+            ? { x: -smoothed.x, y: -smoothed.y, z: -smoothed.z }
+            : smoothed;
         return {
             point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
-            normal: smoothed,
+            normal,
         };
     }
 
-    // Try the upward ray.
-    if (hitsUp.length > 0) {
-        const hit = hitsUp[0];
-        const smoothed = calculateSmoothedNormal(hit);
-        return {
-            point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
-            normal: { x: -smoothed.x, y: -smoothed.y, z: -smoothed.z },
-        };
+    // Off-silhouette contact (e.g. an island contact snapped slightly outside
+    // the mesh): both vertical rays miss. Rather than float, shoot from the
+    // contact toward the mesh centre and snap onto the nearest surface so the
+    // support still attaches.
+    const box = new THREE.Box3().setFromObject(mesh);
+    const centre = box.getCenter(new THREE.Vector3());
+    const toCentre = new THREE.Vector3(centre.x - tipPos.x, centre.y - tipPos.y, centre.z - tipPos.z);
+    if (toCentre.lengthSq() > 1e-6) {
+        toCentre.normalize();
+        raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z), toCentre);
+        const hitsC = raycaster.intersectObject(mesh, false);
+        if (hitsC.length > 0) {
+            const hit = hitsC[0];
+            const smoothed = calculateSmoothedNormal(hit);
+            // Point the normal back toward the incoming support (opposite the
+            // ray direction we cast into the surface).
+            const dot = smoothed.x * toCentre.x + smoothed.y * toCentre.y + smoothed.z * toCentre.z;
+            const facing = dot > 0
+                ? { x: -smoothed.x, y: -smoothed.y, z: -smoothed.z }
+                : smoothed;
+            return { point: { x: hit.point.x, y: hit.point.y, z: hit.point.z }, normal: facing };
+        }
     }
 
     // Fallback: keep the existing normal.
@@ -347,11 +380,28 @@ function placeOneCandidate(
     const snapshot = getSnapshot();
     const mesh = getModelMesh(candidate.modelId) ?? undefined;
 
-    // Resolve the real surface normal by raycasting against the mesh.
-    // candidateFromIsland sets tipNormal to {0,0,-1} as a placeholder.
-    const resolved = resolveSurfaceNormal(candidate.tipPos, mesh);
-    const tipPos = resolved.point;
-    const tipNormal = resolved.normal;
+    // Resolve the contact point + normal.
+    // Overhang candidates already carry an on-surface point and the true
+    // down-facing face normal from the sampler. Raycasting would snap to the
+    // up-facing TOP surface and flip the normal upward — which buildTrunkData
+    // rejects as ANGLE_TOO_STEEP — so use the sampler values directly.
+    let tipPos: { x: number; y: number; z: number };
+    let tipNormal: { x: number; y: number; z: number };
+    if (candidate.source === 'overhang') {
+        tipPos = candidate.tipPos;
+        tipNormal = candidate.tipNormal;
+    } else {
+        const resolved = resolveSurfaceNormal(candidate.tipPos, mesh);
+        tipPos = resolved.point;
+        tipNormal = resolved.normal;
+    }
+    // Supports approach from below, so the contact normal must point outward in
+    // the downward hemisphere. If it points upward (into the model — common for
+    // off-surface island contacts whose raycast snapped to the top face), fall
+    // back to straight-down so the trunk can attach.
+    if (tipNormal.z > -0.05) {
+        tipNormal = { x: 0, y: 0, z: -1 };
+    }
 
     // Determine preset band for analytics.
     const area = candidate.islandAreaMm2;
@@ -536,12 +586,10 @@ function placeOneCandidate(
                 }
             }
         }
-        const bbox = mesh ? new THREE.Box3().setFromObject(mesh) : null;
         console.log(LOG_PREFIX,
-            `Rejected ${candidate.id}: trunk build error \"${trunkResult.error}\" ` +
+            `Rejected ${candidate.id} (${candidate.source}): trunk build error "${trunkResult.error}" ` +
             `tip=(${tipPos.x.toFixed(1)},${tipPos.y.toFixed(1)},${tipPos.z.toFixed(1)}) ` +
-            `mesh=${mesh ? 'yes' : 'no'} ` +
-            `bbox=${bbox ? `(${bbox.min.x.toFixed(0)},${bbox.min.y.toFixed(0)},${bbox.min.z.toFixed(0)})-(${bbox.max.x.toFixed(0)},${bbox.max.y.toFixed(0)},${bbox.max.z.toFixed(0)})` : 'none'}`);
+            `normal=(${tipNormal.x.toFixed(2)},${tipNormal.y.toFixed(2)},${tipNormal.z.toFixed(2)})`);
         return { kind: 'reject', rejectedReason: 'trunk_build_error', preset };
     }
 
@@ -672,6 +720,17 @@ export function runAutoPlace(
     let candidates = generateCandidates(islands, autoSettings);
     candidates = candidates.map((c): CandidatePoint => ({ ...c, modelId }));
 
+    // Overhang surface sampling — broad down-facing faces the island detector
+    // misses (islands only flag failures, not layer-supported overhangs that
+    // still need holding). These candidates are already on the mesh surface.
+    const meshForOverhang = getModelMesh(modelId) ?? undefined;
+    if (autoSettings.overhangSamplingEnabled && meshForOverhang) {
+        const overhang = generateOverhangCandidates(meshForOverhang, autoSettings, modelId);
+        console.log(LOG_PREFIX, `Overhang sampling: +${overhang.length} candidates ` +
+            `(angle<${autoSettings.overhangAngleThresholdDeg}°, spacing ${autoSettings.overhangSpacingMm}mm)`);
+        candidates = candidates.concat(overhang);
+    }
+
     console.log(LOG_PREFIX,
         `Step 1/3: ${candidates.length} candidates generated ` +
         `(filtered from ${islands.length} islands, min area ${autoSettings.minIslandAreaMm2}mm²)`);
@@ -722,6 +781,7 @@ export function runAutoPlace(
     if (mesh) mesh.updateMatrixWorld();
     console.log(LOG_PREFIX,
         `Mesh for ${modelId}: ${mesh ? 'available (pathfinding + SDF active)' : 'UNAVAILABLE (supports route straight, no collision avoidance)'}`);
+
 
     const gridEnabled = getSettings().grid?.enabled;
     console.log(LOG_PREFIX,

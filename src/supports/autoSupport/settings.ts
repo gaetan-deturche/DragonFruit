@@ -8,6 +8,14 @@ export interface AutoSupportSettings {
     densityFactor: number;
     tipInfluenceRadiusMm: number;
     prioritizeIntersection: boolean;
+    /** When true, sample down-facing overhang surfaces (not just islands) so
+     *  broad overhangs get evenly-distributed supports. */
+    overhangSamplingEnabled: boolean;
+    /** Support down-faces whose inclination from horizontal is below this
+     *  (deg). 45 ≈ standard resin overhang threshold. Higher = more faces. */
+    overhangAngleThresholdDeg: number;
+    /** XY grid spacing between sampled overhang support candidates (mm). */
+    overhangSpacingMm: number;
     /** Max combined leaves + branches that can attach to a single trunk. */
     maxAttachmentsPerTrunk: number;
     /** Max vertical distance from knot to tip for a valid branch/leaf attachment. */
@@ -40,6 +48,8 @@ type NumericAutoSupportSettingKey =
     | 'minTrunkSeparationMm'
     | 'densityFactor'
     | 'tipInfluenceRadiusMm'
+    | 'overhangAngleThresholdDeg'
+    | 'overhangSpacingMm'
     | 'maxAttachmentsPerTrunk'
     | 'maxVerticalAttachmentDistanceMm'
     | 'maxHorizontalAttachmentDistanceMm'
@@ -55,6 +65,8 @@ export const AUTO_SUPPORT_CONSTRAINTS = {
     minTrunkSeparationMm: { min: 3, max: 30, step: 0.5, defaultValue: 6 },
     densityFactor: { min: 0.5, max: 3.0, step: 0.1, defaultValue: 1.0 },
     tipInfluenceRadiusMm: { min: 0.1, max: 10, step: 0.1, defaultValue: 0.5 },
+    overhangAngleThresholdDeg: { min: 20, max: 80, step: 1, defaultValue: 45 },
+    overhangSpacingMm: { min: 1.5, max: 12, step: 0.5, defaultValue: 4 },
     maxAttachmentsPerTrunk: { min: 2, max: 50, step: 1, defaultValue: 12, integer: true },
     maxVerticalAttachmentDistanceMm: { min: 5, max: 80, step: 1, defaultValue: 40 },
     maxHorizontalAttachmentDistanceMm: { min: 2, max: 40, step: 0.5, defaultValue: 15 },
@@ -110,6 +122,9 @@ export function createDefaultAutoSupportSettings(): AutoSupportSettings {
         densityFactor: AUTO_SUPPORT_CONSTRAINTS.densityFactor.defaultValue,
         tipInfluenceRadiusMm: AUTO_SUPPORT_CONSTRAINTS.tipInfluenceRadiusMm.defaultValue,
         prioritizeIntersection: false,
+        overhangSamplingEnabled: true,
+        overhangAngleThresholdDeg: AUTO_SUPPORT_CONSTRAINTS.overhangAngleThresholdDeg.defaultValue,
+        overhangSpacingMm: AUTO_SUPPORT_CONSTRAINTS.overhangSpacingMm.defaultValue,
         maxAttachmentsPerTrunk: AUTO_SUPPORT_CONSTRAINTS.maxAttachmentsPerTrunk.defaultValue,
         maxVerticalAttachmentDistanceMm: AUTO_SUPPORT_CONSTRAINTS.maxVerticalAttachmentDistanceMm.defaultValue,
         maxHorizontalAttachmentDistanceMm: AUTO_SUPPORT_CONSTRAINTS.maxHorizontalAttachmentDistanceMm.defaultValue,
@@ -135,6 +150,9 @@ export function normalizeAutoSupportSettings(input?: Partial<AutoSupportSettings
         densityFactor: clampNumeric(source.densityFactor, AUTO_SUPPORT_CONSTRAINTS.densityFactor),
         tipInfluenceRadiusMm: clampNumeric(source.tipInfluenceRadiusMm, AUTO_SUPPORT_CONSTRAINTS.tipInfluenceRadiusMm),
         prioritizeIntersection: normalizeBoolean(source.prioritizeIntersection, defaults.prioritizeIntersection),
+        overhangSamplingEnabled: normalizeBoolean(source.overhangSamplingEnabled, defaults.overhangSamplingEnabled),
+        overhangAngleThresholdDeg: clampNumeric(source.overhangAngleThresholdDeg, AUTO_SUPPORT_CONSTRAINTS.overhangAngleThresholdDeg),
+        overhangSpacingMm: clampNumeric(source.overhangSpacingMm, AUTO_SUPPORT_CONSTRAINTS.overhangSpacingMm),
         maxAttachmentsPerTrunk: clampNumeric(source.maxAttachmentsPerTrunk, AUTO_SUPPORT_CONSTRAINTS.maxAttachmentsPerTrunk),
         maxVerticalAttachmentDistanceMm: clampNumeric(source.maxVerticalAttachmentDistanceMm, AUTO_SUPPORT_CONSTRAINTS.maxVerticalAttachmentDistanceMm),
         maxHorizontalAttachmentDistanceMm: clampNumeric(source.maxHorizontalAttachmentDistanceMm, AUTO_SUPPORT_CONSTRAINTS.maxHorizontalAttachmentDistanceMm),
