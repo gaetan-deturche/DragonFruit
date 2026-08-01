@@ -1236,7 +1236,8 @@ export function removeBranchJoint(branchId: string, jointId: string): { before: 
 
 export type RemoveJointByIdResult =
     | { kind: 'trunk'; trunkId: string; before: Trunk; after: Trunk }
-    | { kind: 'branch'; branchId: string; before: Branch; after: Branch };
+    | { kind: 'branch'; branchId: string; before: Branch; after: Branch }
+    | { kind: 'kickstand'; kickstandId: string; before: Kickstand; after: Kickstand };
 
 export function removeJointById(jointId: string): RemoveJointByIdResult | null {
     for (const [trunkId, trunk] of Object.entries(state.trunks)) {
@@ -1259,6 +1260,42 @@ export function removeJointById(jointId: string): RemoveJointByIdResult | null {
         if (result) {
             return { kind: 'branch', branchId, ...result };
         }
+    }
+
+    // Kickstands live in a separate store — check them too so deleting a
+    // kickstand joint removes just that joint rather than the entire support.
+    const kickstandSnapshot = getKickstandSnapshot();
+    for (const [kickstandId, kickstand] of Object.entries(kickstandSnapshot.kickstands)) {
+        const hasJoint = kickstand.segments.some(
+            (seg) => seg.topJoint?.id === jointId || seg.bottomJoint?.id === jointId,
+        );
+        if (!hasJoint) continue;
+
+        const lowerIndex = resolveLowerSegmentIndex(kickstand.segments, jointId);
+        if (lowerIndex === -1) return null;
+
+        const before = deepClone(kickstand);
+        const after = deepClone(kickstand);
+        const segments = after.segments;
+        const lowerSegment = segments[lowerIndex];
+        if (!lowerSegment) return null;
+
+        const nextIndex = lowerIndex + 1;
+        const upperSegment = nextIndex < segments.length ? segments[nextIndex] : undefined;
+
+        if (upperSegment) {
+            // Merge: lower segment absorbs upper segment's top joint
+            lowerSegment.topJoint = upperSegment.topJoint
+                ? deepClone(upperSegment.topJoint)
+                : undefined;
+            segments.splice(nextIndex, 1);
+        } else {
+            // Last joint in the chain — just drop it
+            lowerSegment.topJoint = undefined;
+        }
+
+        updateKickstand(after);
+        return { kind: 'kickstand', kickstandId, before, after };
     }
 
     return null;

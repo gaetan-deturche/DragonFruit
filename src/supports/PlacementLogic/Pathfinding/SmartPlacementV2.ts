@@ -1350,37 +1350,20 @@ export function isResolvedChainReplacementBetter(
     candidate: ResolvedChainMetrics,
     current: ResolvedChainMetrics,
 ): boolean {
-    const eps = 0.000001;
+    // Weighted scoring: lower = better.
+    // Joint count gets an exponential penalty so the pathfinder strongly
+    // prefers fewer joints — each additional joint roughly doubles the
+    // penalty, making 3+ joint "maze" paths extremely expensive.
+    const JOINT_BASE = 2.5;
+    const JOINT_WEIGHT = 20;
+    const score = (m: ResolvedChainMetrics) =>
+        m.firstSegmentAngleFromVerticalDeg * 3
+        + m.firstSegmentLateral * 3
+        + Math.pow(JOINT_BASE, m.jointCount) * JOINT_WEIGHT
+        + m.totalLateral * 0.5
+        + m.totalLength * 0.2;
 
-    if (candidate.firstSegmentAngleFromVerticalDeg < current.firstSegmentAngleFromVerticalDeg - eps) {
-        return true;
-    }
-    if (candidate.firstSegmentAngleFromVerticalDeg > current.firstSegmentAngleFromVerticalDeg + eps) {
-        return false;
-    }
-
-    if (candidate.firstSegmentLateral < current.firstSegmentLateral - eps) {
-        return true;
-    }
-    if (candidate.firstSegmentLateral > current.firstSegmentLateral + eps) {
-        return false;
-    }
-
-    if (candidate.totalLateral < current.totalLateral - eps) {
-        return true;
-    }
-    if (candidate.totalLateral > current.totalLateral + eps) {
-        return false;
-    }
-
-    if (candidate.totalLength < current.totalLength - eps) {
-        return true;
-    }
-    if (candidate.totalLength > current.totalLength + eps) {
-        return false;
-    }
-
-    return candidate.jointCount < current.jointCount;
+    return score(candidate) < score(current) - 0.0001;
 }
 
 // ---------- Roots cone volume check ----------
@@ -2853,8 +2836,13 @@ export function calculateSmartPlacementV2(
                 // Run when: (a) zero-joint sweep failed and we still have 2+ joints, OR
                 // (b) zero-joint sweep found a path but the base is laterally far from
                 // the socket — a one-joint path with a closer base may be better.
+                // (c) single joint is too shallow — try to find a deeper alternative.
                 const _zeroLateral = distanceXY(socketPos, { x: _finalBase.basePos.x, y: _finalBase.basePos.y, z: socketPos.z });
-                const _needOneJointSearch = _finalJoints.length >= 2 || (_finalJoints.length === 0 && _zeroLateral > 1.5);
+                const _firstJointDrop = _finalJoints.length >= 1 ? (socketPos.z - _finalJoints[0].z) : Infinity;
+                const _oneJointMinFirstDropMm = 4.0;
+                const _needOneJointSearch = _finalJoints.length >= 2
+                    || (_finalJoints.length === 0 && _zeroLateral > 1.5)
+                    || (_finalJoints.length === 1 && _firstJointDrop < _oneJointMinFirstDropMm);
                 if (!isPreview && _needOneJointSearch) {
                     const _baseCandidates: Array<{ x: number; y: number }> = [];
                     _baseCandidates.push({ x: _finalBase.basePos.x, y: _finalBase.basePos.y });
@@ -2913,8 +2901,7 @@ export function calculateSmartPlacementV2(
                     let _skipSeg1 = 0;
                     let _skipSeg2 = 0;
                     let _skipAngle = 0;
-                    const _oneJointMinFirstDropMm = 4.0;
-                    const _oneJointEarlyBendPenaltyPerMm = 12.0;
+                    const _oneJointEarlyBendPenaltyPerMm = 30.0;
 
                     const _rootsFitCache = new Map<string, boolean>();
                     const _rootsFitAt = (x: number, y: number): boolean => {
@@ -3152,6 +3139,85 @@ export function calculateSmartPlacementV2(
                 }
             }
 
+            // Deepen shallow single joints: when the final result has exactly one
+            // joint with very little Z drop (< 4mm), try to push it down so the
+            // first segment is more vertical.  A near-horizontal kick right at the
+            // socket is hard to print; a deeper joint produces a gentler angle.
+            // Search includes small XY perturbations at each Z step in case the
+            // exact-same-XY path is blocked by thin geometry.
+            const _deepeningMinFirstDropMm = 4.0;
+            if (_finalJoints.length === 1 && (socketPos.z - _finalJoints[0].z) < _deepeningMinFirstDropMm) {
+                const _jOrig = _finalJoints[0];
+                const _crt: Vec3 = { x: _finalBase.basePos.x, y: _finalBase.basePos.y, z: rootTopZ };
+                const _deepenStep = 0.5;
+                let _bestZ = _jOrig.z;
+                // XY perturbations to try when exact-same-XY is blocked
+                const _xyOffsets = [0, 0.3, 0.6];
+                for (let _zTry = _jOrig.z - _deepenStep; _zTry > rootTopZ + 1; _zTry -= _deepenStep) {
+                    let _foundAtZ = false;
+                    for (const _offR of _xyOffsets) {
+                        const _angles = _offR === 0 ? [0] : [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI, 5 * Math.PI / 4, 3 * Math.PI / 2, 7 * Math.PI / 4];
+                        for (const _ang of _angles) {
+                            const _jx = _jOrig.x + Math.cos(_ang) * _offR;
+                            const _jy = _jOrig.y + Math.sin(_ang) * _offR;
+                            const _jTry: Vec3 = { x: _jx, y: _jy, z: _zTry };
+                            // socket → deepened joint
+                            if (segmentBlockedBetween(socketPos, _jTry)) continue;
+                            if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(socketPos, _jTry, maxSegmentAngleFromVerticalDeg)) continue;
+                            // deepened joint → rootTop
+                            const _crtJ: Vec3 = { x: _jx, y: _jy, z: rootTopZ };
+                            if (!rootsDiskBlockedAt(_jx, _jy) && !segmentBlockedBetween(_jTry, _crtJ)
+                                && segmentSatisfiesLengthAwareMaxAngleFromVertical(_jTry, _crtJ, maxSegmentAngleFromVerticalDeg)) {
+                                _bestZ = _zTry;
+                                // Update base XY too so seg2 stays straight-down
+                                _finalBase = {
+                                    basePos: { x: _jx, y: _jy, z: 0 },
+                                    rootTopTarget: _crtJ,
+                                    snapDistance: 0,
+                                    nodeKey: null,
+                                };
+                                _finalRootTop = _crtJ;
+                                _foundAtZ = true;
+                                break;
+                            }
+                        }
+                        if (_foundAtZ) break;
+                    }
+                    if (!_foundAtZ) break; // this Z has no viable XY; deeper won't help
+                }
+                if (_bestZ < _jOrig.z) {
+                    _finalJoints = [{ x: _finalBase.basePos.x, y: _finalBase.basePos.y, z: _bestZ }];
+                }
+            }
+
+            // Terminal joint cleanup: when the last joint sits directly above the
+            // base (same XY within 0.6mm), try removing it — it's often just an
+            // A* grid artifact.  Use relaxed clearance on retry since base-adjacent
+            // segments tolerate closer model proximity than socket-adjacent ones.
+            if (_finalJoints.length >= 1) {
+                const _tlj = _finalJoints[_finalJoints.length - 1];
+                const _tldxy = distanceXY(_tlj, _finalBase.rootTopTarget);
+                if (_tldxy < 0.6) {
+                    const _tprev = _finalJoints.length >= 2
+                        ? _finalJoints[_finalJoints.length - 2]
+                        : socketPos;
+                    const _tdirect = _finalBase.rootTopTarget;
+                    if (segmentSatisfiesLengthAwareMaxAngleFromVertical(_tprev, _tdirect, maxSegmentAngleFromVerticalDeg)) {
+                        let _tcan = !segmentBlockedBetween(_tprev, _tdirect);
+                        if (!_tcan) {
+                            _tcan = !sdf.segmentBlocked(
+                                _tprev.x, _tprev.y, _tprev.z,
+                                _tdirect.x, _tdirect.y, _tdirect.z,
+                                clearance * 0.4,
+                            );
+                        }
+                        if (_tcan) {
+                            _finalJoints = _finalJoints.slice(0, -1);
+                        }
+                    }
+                }
+            }
+
             // Quality gate: if still 2+ joints and they're all crammed into a
             // tight Z band (< MIN_ROUTING_Z_SPAN_MM), the path is squeezing
             // through a model crack — reject it rather than embed the support.
@@ -3183,6 +3249,28 @@ export function calculateSmartPlacementV2(
                 }
             }
             if (_angleOk) {
+                // Quality gate: reject excessively complex routed paths.
+                // A "maze" of 3+ joints or a multi-joint path starting with a
+                // near-horizontal kick are fragile to print.  Fall back to a
+                // rescue placement (different socket or straight support) when
+                // one is available.
+                const _firstDrop = _finalJoints.length > 0 ? (socketPos.z - _finalJoints[0].z) : Infinity;
+                const _isExcessive =
+                    _finalJoints.length >= 3
+                    || (_finalJoints.length >= 2 && _firstDrop < 2.0)
+                    || (_finalJoints.length >= 1 && _firstDrop < 0.5);
+                if (!isPreview && _isExcessive) {
+                    const _rescue = buildStraightRescueFallback();
+                    if (_rescue) {
+                        if (!isPreview) {
+                            console.log(
+                                `[SmartPlacementV2] WIDE-STEP rejected — excessive complexity (joints=${_finalJoints.length} firstDrop=${_firstDrop.toFixed(2)}mm), falling back to rescue`,
+                            );
+                        }
+                        publishPathfindingDebugSnapshot();
+                        return _rescue;
+                    }
+                }
                 if (!isPreview) {
                     const _wideChain = [socketPos, ..._finalJoints, _finalRootTop];
                     const _wideSegs = _wideChain.slice(0,-1).map((p,i) => {
@@ -3553,7 +3641,33 @@ export function calculateSmartPlacementV2(
                 if (!seg2Ok) continue;
                 if (!currentChainIsBetterThan([oc.joint], candRootTop)) continue;
 
-                finalJoints = [oc.joint];
+                // Deepen shallow joints: walk the joint down at the same XY
+                // so the first segment is more vertical and printable.
+                let _fineJoint = oc.joint;
+                {
+                    const _fineMinFirstDropMm = 4.0;
+                    const _fineFirstDrop = socketPos.z - _fineJoint.z;
+                    if (_fineFirstDrop < _fineMinFirstDropMm) {
+                        const _deepenStep = 0.5;
+                        const _deepened: Vec3 = { x: _fineJoint.x, y: _fineJoint.y, z: _fineJoint.z };
+                        for (let _zTry = _fineJoint.z - _deepenStep; _zTry > rootTopZ + 1; _zTry -= _deepenStep) {
+                            const _jTry: Vec3 = { x: _deepened.x, y: _deepened.y, z: _zTry };
+                            // seg1: socket → deepened joint
+                            if (segmentBlockedBetween(socketPos, _jTry)) break;
+                            if (!firstSegmentSatisfiesSocketElbowMaxAngle(socketPos, _jTry, maxSegmentAngleFromVerticalDeg)) continue;
+                            // seg2: deepened joint → rootTop
+                            const _crt: Vec3 = { x: oc.baseXY.x, y: oc.baseXY.y, z: rootTopZ };
+                            if (segmentBlockedBetween(_jTry, _crt)) continue;
+                            if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(_jTry, _crt, maxSegmentAngleFromVerticalDeg)) continue;
+                            _deepened.z = _zTry;
+                        }
+                        if (_deepened.z < _fineJoint.z) {
+                            _fineJoint = _deepened;
+                        }
+                    }
+                }
+
+                finalJoints = [_fineJoint];
                 finalBase = {
                     basePos: { x: oc.baseXY.x, y: oc.baseXY.y, z: 0 },
                     rootTopTarget: candRootTop,
@@ -3561,6 +3675,80 @@ export function calculateSmartPlacementV2(
                     nodeKey: null,
                 };
                 break;
+            }
+        }
+    }
+
+    // Deepen shallow single joints: when the final result has exactly one
+    // joint with very little Z drop, push it down so the first segment is
+    // more vertical and printable.  Same logic as the wide-step deepening.
+    if (finalJoints.length === 1 && (socketPos.z - finalJoints[0].z) < 4.0) {
+        const _jOrig = finalJoints[0];
+        const _crtB: Vec3 = { x: finalBase.basePos.x, y: finalBase.basePos.y, z: rootTopZ };
+        const _deepenStep = 0.5;
+        let _bestZ = _jOrig.z;
+        const _xyOffsets = [0, 0.3, 0.6];
+        for (let _zTry = _jOrig.z - _deepenStep; _zTry > rootTopZ + 1; _zTry -= _deepenStep) {
+            let _foundAtZ = false;
+            for (const _offR of _xyOffsets) {
+                const _angles = _offR === 0 ? [0] : [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI, 5 * Math.PI / 4, 3 * Math.PI / 2, 7 * Math.PI / 4];
+                for (const _ang of _angles) {
+                    const _jx = _jOrig.x + Math.cos(_ang) * _offR;
+                    const _jy = _jOrig.y + Math.sin(_ang) * _offR;
+                    const _jTry: Vec3 = { x: _jx, y: _jy, z: _zTry };
+                    // seg1: socket → deepened joint
+                    if (segmentBlockedBetween(socketPos, _jTry)) continue;
+                    if (!firstSegmentSatisfiesSocketElbowMaxAngle(socketPos, _jTry, maxSegmentAngleFromVerticalDeg)) continue;
+                    // seg2: deepened joint → rootTop
+                    const _crtJ: Vec3 = { x: _jx, y: _jy, z: rootTopZ };
+                    if (!rootsDiskBlockedAt(_jx, _jy) && !segmentBlockedBetween(_jTry, _crtJ)
+                        && segmentSatisfiesLengthAwareMaxAngleFromVertical(_jTry, _crtJ, maxSegmentAngleFromVerticalDeg)) {
+                        _bestZ = _zTry;
+                        finalBase = {
+                            basePos: { x: _jx, y: _jy, z: 0 },
+                            rootTopTarget: _crtJ,
+                            snapDistance: distanceXY({ x: _jx, y: _jy, z: 0 }, unsnappedBottomPos),
+                            nodeKey: null,
+                        };
+                        _foundAtZ = true;
+                        break;
+                    }
+                }
+                if (_foundAtZ) break;
+            }
+            if (!_foundAtZ) break;
+        }
+        if (_bestZ < _jOrig.z) {
+            finalJoints = [{ x: finalBase.basePos.x, y: finalBase.basePos.y, z: _bestZ }];
+        }
+    }
+
+    // Terminal joint cleanup: when the last joint sits directly above the
+    // base (same XY), it's often just an A* grid artifact — the path reached
+    // the base column early and added a vertical drop segment.  Try removing
+    // it with progressively relaxed clearance since base-adjacent segments
+    // are less sensitive to resin overexposure than socket-adjacent ones.
+    if (finalJoints.length >= 1) {
+        const _lastJ = finalJoints[finalJoints.length - 1];
+        const _lastDxy = distanceXY(_lastJ, finalBase.rootTopTarget);
+        if (_lastDxy < 0.6) {
+            const _prevPt = finalJoints.length >= 2
+                ? finalJoints[finalJoints.length - 2]
+                : socketPos;
+            const _directTarget = finalBase.rootTopTarget;
+            if (segmentSatisfiesLengthAwareMaxAngleFromVertical(_prevPt, _directTarget, maxSegmentAngleFromVerticalDeg)) {
+                // Try full clearance first, then half clearance
+                let _canRemove = !segmentBlockedBetween(_prevPt, _directTarget);
+                if (!_canRemove) {
+                    _canRemove = !sdf.segmentBlocked(
+                        _prevPt.x, _prevPt.y, _prevPt.z,
+                        _directTarget.x, _directTarget.y, _directTarget.z,
+                        clearance * 0.4,
+                    );
+                }
+                if (_canRemove) {
+                    finalJoints = finalJoints.slice(0, -1);
+                }
             }
         }
     }
@@ -3697,6 +3885,28 @@ export function calculateSmartPlacementV2(
             `  base/rootTop: (${finalBase.basePos.x.toFixed(2)},${finalBase.basePos.y.toFixed(2)}) rootTopZ=${finalBase.rootTopTarget.z.toFixed(2)}\n` +
             segmentLog.join('\n'),
         );
+    }
+
+    // Quality gate: reject excessively complex routed paths in the fine-step
+    // path too (same criteria as the wide-step quality gate).
+    {
+        const _firstDrop = finalJoints.length > 0 ? (socketPos.z - finalJoints[0].z) : Infinity;
+        const _isExcessive =
+            finalJoints.length >= 3
+            || (finalJoints.length >= 2 && _firstDrop < 2.0)
+            || (finalJoints.length >= 1 && _firstDrop < 0.5);
+        if (!isPreview && _isExcessive) {
+            const _rescue = buildStraightRescueFallback();
+            if (_rescue) {
+                if (!isPreview) {
+                    console.log(
+                        `[SmartPlacementV2] PLACED support rejected — excessive complexity (joints=${finalJoints.length} firstDrop=${_firstDrop.toFixed(2)}mm), falling back to rescue`,
+                    );
+                }
+                publishPathfindingDebugSnapshot();
+                return _rescue;
+            }
+        }
     }
 
     publishPathfindingDebugSnapshot();
@@ -3847,13 +4057,13 @@ function jointsAreNearCollinear(a: Vec3, b: Vec3, c: Vec3): boolean {
 function jointAddsNegligibleLateralDetour(a: Vec3, b: Vec3, c: Vec3): boolean {
     const splitLateral = distanceXY(a, b) + distanceXY(b, c);
     const directLateral = distanceXY(a, c);
-    return splitLateral - directLateral <= 0.75;
+    return splitLateral - directLateral <= 1.5;
 }
 
 function jointAddsNegligibleLengthDetour(a: Vec3, b: Vec3, c: Vec3): boolean {
     const splitLength = distance3D(a, b) + distance3D(b, c);
     const directLength = distance3D(a, c);
-    return splitLength - directLength <= 1.0;
+    return splitLength - directLength <= 2.0;
 }
 
 /**

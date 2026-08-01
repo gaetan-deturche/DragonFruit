@@ -16,6 +16,7 @@ import {
     updateRootsProfile,
     updateGridSettings,
     updateAutoBracingSettings,
+    updateAutoSupportSettings,
     updateDevToolsEnabled,
 } from './state';
 import {
@@ -48,6 +49,7 @@ import { CurveSettingsCard, getCurveSettingsSelection } from '../Curves/CurveSet
 import { runAutoBracing } from '../autoBracing/autoBrace';
 import { shouldRunAutoBracingHotkey } from '../autoBracing/autoBracingHotkey';
 import { useActionActive } from '@/hotkeys/hotkeyStore';
+import { AutoSupportSettingsCard } from '../autoSupport';
 import { setAnatomyPreviewActiveSettingKey, subscribeToAnatomyPreviewState, getAnatomyPreviewState } from './AnatomyPreview/previewState';
 import {
     getSupportKindSnapshot,
@@ -84,9 +86,10 @@ const KIND_META: Record<SupportKind, { label: string; icon: typeof Pickaxe }> = 
     raft: { label: 'Raft', icon: Sailboat },
     grid: { label: 'Grid', icon: Grid3X3 },
     stick: { label: 'Bracing', icon: WandSparkles },
+    auto: { label: 'Auto', icon: Sparkles },
 };
 
-const OVERFLOW_COMPACT_KIND_SET = new Set<SupportKind>(['trunk', 'raft', 'grid', 'stick']);
+const OVERFLOW_COMPACT_KIND_SET = new Set<SupportKind>(['trunk', 'raft', 'grid', 'stick', 'auto']);
 const POPUP_PREVIEW_KIND_SET = new Set<SupportKind>(['trunk']);
 
 function normalizeTabKind(kind: SupportKind): SupportKind {
@@ -215,12 +218,14 @@ export function SupportSidebar() {
     const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle');
     const [presetSaveTrigger, setPresetSaveTrigger] = useState(0);
     const [autoBraceStatus, setAutoBraceStatus] = useState<{ kind: 'success' | 'warning' | 'error'; message: string } | null>(null);
+    const [autoSupportStatus, setAutoSupportStatus] = useState<{ kind: 'success' | 'warning' | 'error'; message: string } | null>(null);
     const [defaultsAnimating, setDefaultsAnimating] = useState(false);
     const [expanded, setExpanded] = React.useState(true);
     const [devToolsOpen, setDevToolsOpen] = useState(false);
     const saveStatusTimeoutRef = React.useRef<number | null>(null);
     const autoBraceStatusTimeoutRef = React.useRef<number | null>(null);
     const autoBracingHotkeyWasActiveRef = React.useRef(false);
+    const autoSupportStatusTimeoutRef = React.useRef<number | null>(null);
     const isAdaptiveConeAngle = (settings.tip.coneAngleMode ?? 'normal') === 'adaptive';
     const supportKindState = React.useSyncExternalStore(subscribeToSupportKindState, getSupportKindSnapshot, getSupportKindSnapshot);
     const activeKind = supportKindState.kind;
@@ -480,6 +485,10 @@ export function SupportSidebar() {
                 window.clearTimeout(autoBraceStatusTimeoutRef.current);
                 autoBraceStatusTimeoutRef.current = null;
             }
+            if (autoSupportStatusTimeoutRef.current !== null) {
+                window.clearTimeout(autoSupportStatusTimeoutRef.current);
+                autoSupportStatusTimeoutRef.current = null;
+            }
 
             commitPendingSettingsSession(editSessionTargetRef.current);
 
@@ -663,6 +672,29 @@ export function SupportSidebar() {
 
         autoBracingHotkeyWasActiveRef.current = autoBracingHotkeyActive;
     }, [activeKind, autoBracingHotkeyActive, expanded, handleAutoBrace, showCurvePage]);
+    const handleAutoSupport = React.useCallback(() => {
+        try {
+            // NOTE: runAutoPlace needs islands[], modelId, and mesh.
+            // These are not available in SupportSidebar — the actual call
+            // site is in page.tsx where islands and mesh are accessible.
+            // For now, show a message guiding the user to the Islands panel.
+            setAutoSupportStatus({
+                kind: 'warning',
+                message: 'Run Auto-Support from the Islands panel after scanning for islands.',
+            });
+        } catch (err) {
+            console.error('[SupportSidebar] Auto Support failed:', err);
+            setAutoSupportStatus({ kind: 'error', message: 'Auto Support failed. Check console for details.' });
+        }
+
+        if (autoSupportStatusTimeoutRef.current !== null) {
+            window.clearTimeout(autoSupportStatusTimeoutRef.current);
+        }
+        autoSupportStatusTimeoutRef.current = window.setTimeout(() => {
+            setAutoSupportStatus(null);
+            autoSupportStatusTimeoutRef.current = null;
+        }, 2800);
+    }, []);
 
     const getInputProps = React.useCallback((key: string, baseClass: string) => {
         const isActive = activeKey === key;
@@ -1284,6 +1316,20 @@ export function SupportSidebar() {
                                                 />
                                             </div>
                                         </>
+                                    ) : activeKind === 'auto' ? (
+                                        <>
+                                            {!shouldUseOverflowCompactMode ? (
+                                                renderPreviewBox('h-[220px]')
+                                            ) : null}
+                                            <div className="rounded-md border p-2" style={SECTION_CARD_STYLE}>
+                                                <AutoSupportSettingsCard
+                                                    settings={settings.autoSupport}
+                                                    onChange={(partial) => updateAutoSupportSettings(partial)}
+                                                    onAutoSupport={handleAutoSupport}
+                                                    status={autoSupportStatus}
+                                                />
+                                            </div>
+                                        </>
                                     ) : activeKind === 'trunk' ? (
                                         <>
                                             {shouldUseCompactTrunkLayout ? (
@@ -1327,6 +1373,9 @@ export function SupportSidebar() {
                                                             },
                                                             autoBracing: {
                                                                 ...current.autoBracing,
+                                                            },
+                                                            autoSupport: {
+                                                                ...current.autoSupport,
                                                             },
                                                         };
                                                         editSessionLatestSettingsRef.current = nextSettings;
