@@ -3,7 +3,8 @@ import test from 'node:test';
 import { execSync } from 'node:child_process';
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 import '../HotkeyRegistryManager';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -69,7 +70,14 @@ test('Static ESLint rule flags violations in forbidden paths and passes allowed 
     const forbiddenFile = join(workspaceRoot, 'src/hotkeys/temp_mock_forbidden.ts');
     const allowedFile = join(workspaceRoot, 'src/hotkeys/temp_mock_allowed.test.ts');
 
-    const eslintBin = join(workspaceRoot, 'node_modules/eslint/bin/eslint.js');
+    // ASK node where eslint is rather than naming a path. Running it as a direct
+    // node process (not `npx`) is what makes this reliable in CI, and that part
+    // stands; the hardcoded `<workspaceRoot>/node_modules` is what does not. A git
+    // worktree has almost no node_modules of its own — everything resolves to the
+    // main checkout's — so the file simply was not there and the test failed on a
+    // missing module rather than on anything about hotkeys.
+    const require_ = createRequire(pathToFileURL(join(workspaceRoot, 'package.json')));
+    const eslintBin = join(dirname(require_.resolve('eslint/package.json')), 'bin', 'eslint.js');
     const runLint = (filePath: string) =>
         execSync(`"${process.execPath}" "${eslintBin}" "${filePath}"`, { stdio: 'pipe', env: process.env });
 
