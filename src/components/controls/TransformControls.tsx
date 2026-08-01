@@ -1,8 +1,7 @@
-import React, { useState } from 'react';
+import React from 'react';
 import * as THREE from 'three';
 import { NumberInput } from '@/components/ui/NumberInput';
 import { Card, CardHeader, IconButton } from '@/components/atoms';
-import { SNAP_STORAGE_KEY } from '@/components/gizmo/rotate/snapRotation';
 import { useFloatingPanelCollapse } from '@/components/layout/FloatingPanelStack';
 
 interface SectionHeaderProps {
@@ -75,17 +74,6 @@ export function TransformControls({
   onTransformCommit,
 }: TransformControlsProps) {
   const [expanded, setExpanded] = useFloatingPanelCollapse(true);
-  const [snapEnabled, setSnapEnabled] = useState(() => {
-    try { return localStorage.getItem(SNAP_STORAGE_KEY) === 'true'; } catch { return false; }
-  });
-
-  const handleSnapToggle = () => {
-    const next = !snapEnabled;
-    setSnapEnabled(next);
-    try { localStorage.setItem(SNAP_STORAGE_KEY, String(next)); } catch {}
-    window.dispatchEvent(new CustomEvent('dragonfruit:snap-toggle', { detail: { enabled: next } }));
-  };
-
   const compactButtonClass = 'ui-button ui-button-secondary !h-8 whitespace-nowrap px-1.5 text-[10px] sm:text-[11px]';
   const valueInputClass = 'ui-input h-8 w-full px-1.5 text-xs sm:text-sm text-left tabular-nums no-spinners';
 
@@ -314,30 +302,7 @@ export function TransformControls({
 
           {/* ROTATE SECTION */}
           <div className="rounded-md border p-2" style={rotateCardStyle}>
-            <div className="flex items-center">
-              <div className="flex-1" />
-              <SectionHeader title="Rotate" />
-              <div className="flex-1 flex justify-end">
-                <button
-                  type="button"
-                  onClick={handleSnapToggle}
-                  className="h-7 min-w-[64px] rounded-md border px-2 text-[10px] font-semibold uppercase tracking-wide transition-colors"
-                  style={snapEnabled
-                    ? {
-                        borderColor: 'color-mix(in srgb, var(--accent), white 10%)',
-                        background: 'color-mix(in srgb, var(--accent), var(--surface-0) 76%)',
-                        color: 'var(--accent-contrast)',
-                      }
-                    : {
-                        borderColor: 'var(--border-subtle)',
-                        background: 'var(--surface-1)',
-                        color: 'var(--text-muted)',
-                      }}
-                >
-                  Snap
-                </button>
-              </div>
-            </div>
+            <SectionHeader title="Rotate" />
             <div className="pt-1.5 space-y-2">
                 <div className="grid grid-cols-3 gap-1 min-w-0">
                   <div className="min-w-0">

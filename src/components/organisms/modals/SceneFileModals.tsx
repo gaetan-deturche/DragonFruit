@@ -10,7 +10,7 @@ export type SceneFileModalsProps = {
   arrangeOverlayContent: { title: string; detailLines: string[]; };
   arrangeOverlayElapsedLabel: string;
   arrangeOverlayModelCount: number | null;
-  autosaveRecovery: { savedAt: string; } | null;
+  autosaveRecovery: { savedAt: string; voxlPath: string; origin: string } | null;
   closeUnsavedChangesBusy: "none" | "save_and_close" | "discard_and_close";
   handleAutosaveDiscard: () => Promise<void>;
   handleAutosaveRestore: () => Promise<void>;
@@ -24,6 +24,8 @@ export type SceneFileModalsProps = {
   scene: ReturnType<typeof useSceneCollectionManager>;
   sceneSaveChoiceFileName: string | null;
   sceneSaveChoicePath: string | null;
+  sceneSaveError?: { title: string; message: string; detail?: string | null } | null;
+  dismissSceneSaveError?: () => void;
   setPluginImportWarningSkipFuture: React.Dispatch<React.SetStateAction<boolean>>;
   setShowCloseUnsavedChangesModal: React.Dispatch<React.SetStateAction<boolean>>;
   setSupportsInfoModelId: React.Dispatch<React.SetStateAction<string | null>>;
@@ -37,7 +39,7 @@ export type SceneFileModalsProps = {
   zipPickerState: { zipName: string; files: File[]; category: "mesh" | "scene" | "mixed"; defaultSelectionCategory: "mesh" | "scene"; } | null;
 };
 
-/** Editor modal organism: ModelSupportsModal, sceneImportPlacementPrompt, autosaveRecovery, pluginImportWarning, zipPicker, StructuredDialog_closeUnsaved, sceneSaveChoice, arrangeBlockingOverlay. */
+/** Editor modal organism: ModelSupportsModal, sceneImportPlacementPrompt, autosaveRecovery, pluginImportWarning, zipPicker, StructuredDialog_closeUnsaved, sceneSaveChoice, arrangeBlockingOverlay, sceneSaveError. */
 export function SceneFileModals({
   arrangeOverlayContent,
   arrangeOverlayElapsedLabel,
@@ -56,6 +58,8 @@ export function SceneFileModals({
   scene,
   sceneSaveChoiceFileName,
   sceneSaveChoicePath,
+  sceneSaveError = null,
+  dismissSceneSaveError,
   setPluginImportWarningSkipFuture,
   setShowCloseUnsavedChangesModal,
   setSupportsInfoModelId,
@@ -70,6 +74,33 @@ export function SceneFileModals({
 }: SceneFileModalsProps) {
   return (
     <>
+      <StructuredDialogModal
+        open={sceneSaveError !== null}
+        onClose={() => dismissSceneSaveError?.()}
+        ariaLabel="Save Error"
+        icon={<AlertTriangle className="h-5 w-5 text-amber-400" />}
+        title={sceneSaveError?.title ?? 'Save error'}
+        actions={
+          <button
+            type="button"
+            className="ui-button ui-button-accent !h-9 px-4 text-xs font-semibold"
+            onClick={() => dismissSceneSaveError?.()}
+          >
+            OK
+          </button>
+        }
+      >
+        <div className="space-y-2 text-xs" style={{ color: 'var(--text-muted)' }}>
+          <p className="font-medium text-sm" style={{ color: 'var(--text-strong)' }}>
+            {sceneSaveError?.message}
+          </p>
+          {sceneSaveError?.detail && (
+            <pre className="mt-2 overflow-x-auto rounded bg-black/30 p-2 text-[11px] font-mono whitespace-pre-wrap">
+              {sceneSaveError.detail}
+            </pre>
+          )}
+        </div>
+      </StructuredDialogModal>
       <ModelSupportsModal
         isOpen={supportsInfoModelId !== null}
         onClose={() => setSupportsInfoModelId(null)}
@@ -176,6 +207,8 @@ export function SceneFileModals({
       {autosaveRecovery && (
         <SceneAutosaveRecoveryModal
           savedAt={autosaveRecovery.savedAt}
+          voxlPath={autosaveRecovery.voxlPath}
+          origin={autosaveRecovery.origin}
           onRestore={handleAutosaveRestore}
           onDiscard={handleAutosaveDiscard}
         />

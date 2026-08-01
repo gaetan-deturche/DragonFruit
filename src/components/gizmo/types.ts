@@ -104,6 +104,14 @@ export interface GizmoConfig {
   // as displayY = -cutterY in HolePunchGizmo).
   axisVisualFlip?: { x?: number; y?: number; z?: number };
 
+  /**
+   * Rings whose rotation the caller applies to the GIZMO's own frame as well as to
+   * the object — the tenon's roll ring, whose orientation is built from the roll it
+   * sets. Those rings already carry the movement on screen, so their handle must not
+   * advance inside them on top of it, or it travels twice as far as the pointer.
+   */
+  axisFrameCarriesRotation?: { x?: boolean; y?: boolean; z?: boolean };
+
   // Scale behavior
   uniformScaling?: boolean;
 

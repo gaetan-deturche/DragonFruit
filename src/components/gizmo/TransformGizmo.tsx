@@ -184,6 +184,7 @@ export function TransformGizmo({
   disableRingBillboard,
   disableViewCull,
   axisVisualFlip,
+  axisFrameCarriesRotation,
   uniformScaling = true,
 }: TransformGizmoProps) {
   const { isDragging: isGlobalDragging } = usePicking();
@@ -605,8 +606,8 @@ export function TransformGizmo({
           {isRingAllowed('x') && shouldRenderPart('ring-x') && (
             <GizmoRotation
               axis="x"
-              worldAxisDir={worldAxisDirs.x}
               axisVisualFlip={axisVisualFlip?.x ?? 1}
+              frameCarriesRotation={axisFrameCarriesRotation?.x ?? false}
               isHovered={!suppressHover && hoveredPart === 'ring-x'}
               isActive={activePart === 'ring-x'}
               isDimmed={isDimmed('ring-x')}
@@ -628,8 +629,8 @@ export function TransformGizmo({
           {isRingAllowed('y') && shouldRenderPart('ring-y') && (
             <GizmoRotation
               axis="y"
-              worldAxisDir={worldAxisDirs.y}
               axisVisualFlip={axisVisualFlip?.y ?? 1}
+              frameCarriesRotation={axisFrameCarriesRotation?.y ?? false}
               isHovered={!suppressHover && hoveredPart === 'ring-y'}
               isActive={activePart === 'ring-y'}
               isDimmed={isDimmed('ring-y')}
@@ -651,8 +652,8 @@ export function TransformGizmo({
           {isRingAllowed('z') && shouldRenderPart('ring-z') && (
             <GizmoRotation
               axis="z"
-              worldAxisDir={worldAxisDirs.z}
               axisVisualFlip={axisVisualFlip?.z ?? 1}
+              frameCarriesRotation={axisFrameCarriesRotation?.z ?? false}
               isHovered={!suppressHover && hoveredPart === 'ring-z'}
               isActive={activePart === 'ring-z'}
               isDimmed={isDimmed('ring-z')}

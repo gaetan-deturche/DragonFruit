@@ -446,6 +446,12 @@ fn cmd_mesh_read_stl(input: &PathBuf, output: &PathBuf) -> Result<(), String> {
 fn cmd_mesh_info(input: &PathBuf, json_output: bool) -> Result<(), String> {
     let (flat, source) = if input.is_dir() {
         (read_positions_bin(&input.join("positions.bin"))?, "directory")
+    } else if is_voxl_file(input) {
+        let (positions, used_orig) = load_voxl_triangles(input)?;
+        if !json_output {
+            eprintln!("voxl info: used_orig_chunk={}", used_orig);
+        }
+        (positions, "voxl")
     } else {
         (load_binary_stl(input)?, "stl")
     };
@@ -632,7 +638,8 @@ fn cmd_track(input: &PathBuf, output: &PathBuf, overlap: i32, neighborhood: i32)
         let components: Vec<ComponentInfo> = read_json(&input.join("layers").join(format!("{:03}.components.json", l)))?;
 
         let prev_labels = if l > 0 { Some(&island_labels_all[l - 1]) } else { None };
-        let island_labels = tracker.process_layer(l as u32, &candidates, &components, prev_labels, &mask);
+        let is_top = l == num_layers.saturating_sub(1);
+        let island_labels = tracker.process_layer(l as u32, &candidates, &components, prev_labels, &mask, is_top);
 
         write_rle_labels_json(
             &output.join("layers").join(format!("{:03}.island-labels.rle.json", l)),
@@ -763,7 +770,8 @@ fn cmd_island_full(
 
     for (l, lr) in layer_results.iter().enumerate() {
         let prev_labels = if l > 0 { Some(&island_labels_all[l - 1]) } else { None };
-        let island_labels = tracker.process_layer(l as u32, &lr.labels, &lr.components, prev_labels, &lr.solid_mask);
+        let is_top = l == layer_results.len().saturating_sub(1);
+        let island_labels = tracker.process_layer(l as u32, &lr.labels, &lr.components, prev_labels, &lr.solid_mask, is_top);
         write_rle_labels_json(&output.join("layers").join(format!("{:03}.island-labels.rle.json", l)), &island_labels)?;
         let snap = tracker.get_islands();
         write_json(&output.join("tracker-state").join(format!("{:03}.islands.json", l)), &snap)?;
@@ -881,7 +889,8 @@ fn cmd_island_bench(
         let mut island_labels: Vec<RleLabels> = Vec::with_capacity(nl);
         for (l, lr) in layer_results.iter().enumerate() {
             let prev = if l > 0 { Some(&island_labels[l - 1]) } else { None };
-            let il = tracker.process_layer(l as u32, &lr.labels, &lr.components, prev, &lr.solid_mask);
+            let is_top = l == nl.saturating_sub(1);
+            let il = tracker.process_layer(l as u32, &lr.labels, &lr.components, prev, &lr.solid_mask, is_top);
             island_labels.push(il);
         }
         tracker.finalize_islands(nl.saturating_sub(1) as u32);
@@ -1064,11 +1073,19 @@ fn cmd_slice_run(
         .and_then(|e| e.to_str())
         .map(|e| e == "bin")
         .unwrap_or(false);
+    let is_voxl = is_voxl_file(input);
 
-    let flat = if is_positions_bin {
-        read_positions_bin(input)?
+    let (flat, mesh_encoding) = if is_positions_bin {
+        (read_positions_bin(input)?, "positions_bin".to_string())
+    } else if is_voxl {
+        let (positions, used_orig) = load_voxl_triangles(input)?;
+        if !json_output {
+            eprintln!("slice: read VOXL file with {} triangles (used_orig_chunk={})", positions.len() / 9, used_orig);
+        }
+        let encoding = if used_orig { "voxl_orig" } else { "voxl_mesh" };
+        (positions, encoding.to_string())
     } else {
-        load_binary_stl(input)?
+        (load_binary_stl(input)?, "stl".to_string())
     };
     if flat.len() % 9 != 0 {
         return Err(format!("Invalid triangle buffer length: {}", flat.len()));
@@ -1106,7 +1123,12 @@ fn cmd_slice_run(
         anti_aliasing_level: anti_aliasing.to_string(),
         anti_aliasing_mode: anti_aliasing_mode.to_string(),
         blur_brush_radius_px: 1,
+        blur_brush_kernel: "gaussian".to_string(),
+        blur_brush_sigma_x: 0.5,
+        blur_brush_sigma_y: 0.5,
         z_blur_radius_layers: 0,
+        z_blur_kernel: "box".to_string(),
+        z_blur_sigma: 0.5,
         aa_on_supports: false,
         model_triangle_count: (flat.len() / 9) as u32,
         mirror_x,
@@ -1118,6 +1140,9 @@ fn cmd_slice_run(
         zaa_kernel: None,
         zaa_pattern: None,
         zaa_duplicate_z: None,
+        dither_enabled: false,
+        dither_bit_depth: None,
+        dither_device_gamma: 3.0,
         triangles_xyz: flat,
         metadata_json: metadata_json.to_string(),
         format_version: format_version.clone(),
@@ -1137,6 +1162,8 @@ fn cmd_slice_run(
         "build_width_mm": build_width_mm,
         "build_depth_mm": build_depth_mm,
         "resolution_px": [source_width_px, source_height_px],
+        "model_triangle_count": job.model_triangle_count,
+        "mesh_encoding": mesh_encoding,
         "total_s": perf.total_s(),
         "wall_s": wall_s,
         "layers_per_second": perf.layers_per_second(),
@@ -1534,6 +1561,7 @@ fn cmd_benchmark(
         anti_aliasing_mode: "Blur".to_string(),
         blur_brush_radius_px: 1,
         minimum_aa_alpha_percent: 35.0,
+        dither_enabled: false,
     };
 
     if !json_output {

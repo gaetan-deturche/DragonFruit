@@ -139,18 +139,6 @@ export const DEFAULT_KEYBINDINGS: HotkeyConfig = {
             description: 'Pinned Slot 6'
         }
     },
-    ROTATION: {
-        SNAP_COARSE: {
-            key: 'drag',
-            modifier: 'meta',
-            description: 'Rotation Snap (45°)'
-        },
-        SNAP_FINE: {
-            key: 'drag',
-            modifier: 'meta+shift',
-            description: 'Rotation Snap (15°)'
-        }
-    },
     GLOBAL: {
         DELETE: {
             // `Delete` is always available as a fixed secondary delete key (see

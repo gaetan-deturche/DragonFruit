@@ -14,10 +14,6 @@ import type { TrunkReplacementPlan } from './types';
 import { computeAndApplyTrunkDiameterProfile } from './maxConnectedDiameter';
 import { v4 as uuidv4 } from 'uuid';
 
-function generateUuid() {
-    return uuidv4();
-}
-
 function distSq(a: Vec3, b: Vec3): number {
     const dx = a.x - b.x;
     const dy = a.y - b.y;
@@ -160,7 +156,7 @@ function adjustBranchForNewParentKnot(branch: Branch, newParentKnot: Knot): Bran
     const baseMidJoint: Joint | undefined = seg0.topJoint ?? seg1.bottomJoint;
     const midJoint: Joint = baseMidJoint
         ? { ...baseMidJoint, pos: midPos }
-        : { id: generateUuid(), pos: midPos, diameter: seg0.diameter };
+        : { id: uuidv4(), pos: midPos, diameter: seg0.diameter };
 
     const nextSeg0 = {
         ...seg0,
@@ -313,7 +309,7 @@ function createAttachmentKnotOnTrunk(args: {
             if (!satisfiesMinAngleFromHorizontal(tipPos, pos, minAngleDeg)) continue;
 
             return {
-                id: generateUuid(),
+                id: uuidv4(),
                 parentShaftId: seg.id,
                 t,
                 pos,

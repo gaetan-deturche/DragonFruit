@@ -485,7 +485,10 @@ export function OrganicCutTenonGizmo({
       // The roll turns the gizmo's own frame (the basis above is rolled with the
       // tenon), so the blue ring already carries the whole movement. A handle that
       // also advanced inside it went twice as far as the pointer and overtook it.
-      axisVisualFlip={{ z: 0 }}
+      // NOT `axisVisualFlip: 0`: since the protractor dial landed, that factor sits
+      // on the delta the ring EMITS, so zeroing it would stop the tenon rolling at
+      // all. This says the one thing meant — the frame already carries it.
+      axisFrameCarriesRotation={{ z: true }}
       onRotate={handleGizmoRotate}
       onDragStateChange={handleGizmoDragState}
     />

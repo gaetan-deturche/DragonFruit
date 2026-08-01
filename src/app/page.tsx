@@ -321,7 +321,15 @@ import { resolveCompositeMaterialLabel } from '@/utils/materialLabel';
 import { type MeshShaderType } from '@/features/shaders/mesh';
 import type { ModelTransform, TransformMode } from '@/hooks/useModelTransform';
 import type { SupportMode } from '@/supports/types';
-import { useSceneAutosave, suppressSceneAutosave } from '@/hooks/useSceneAutosave';
+import { VoxlSizeLimitError } from '@/features/scene/voxl';
+import {
+  useSceneAutosave,
+  suppressSceneAutosave,
+  resolveAutosaveRecovery,
+  readAutosaveRecoveryBytes,
+  deleteAutosaveSidecarForProject,
+  SCENE_AUTOSAVE_FAILED_EVENT,
+} from '@/hooks/useSceneAutosave';
 import { SceneAutosaveRecoveryModal } from '@/components/scene/SceneAutosaveRecoveryModal';
 import { MeshRepairReportModal } from '@/components/scene/MeshRepairReportModal';
 import { MeshRepairConfirmModal } from '@/components/scene/MeshRepairConfirmModal';
@@ -801,7 +809,12 @@ export default function Home() {
   const [showSceneSaveChoiceModal, setShowSceneSaveChoiceModal] = React.useState(false);
   const [sceneSaveChoiceFileName, setSceneSaveChoiceFileName] = React.useState<string | null>(null);
   const [sceneSaveChoicePath, setSceneSaveChoicePath] = React.useState<string | null>(null);
-  const [autosaveRecovery, setAutosaveRecovery] = React.useState<{ savedAt: string } | null>(null);
+  const [autosaveRecovery, setAutosaveRecovery] = React.useState<{
+    savedAt: string;
+    /** The payload discovery resolved — the restore reads this exact file. */
+    voxlPath: string;
+    origin: string;
+  } | null>(null);
   const [showCloseUnsavedChangesModal, setShowCloseUnsavedChangesModal] = React.useState(false);
   const [closeUnsavedChangesBusy, setCloseUnsavedChangesBusy] = React.useState<'none' | 'save_and_close' | 'discard_and_close'>('none');
   const [hasUnsavedSceneChanges, setHasUnsavedSceneChanges] = React.useState(false);
@@ -848,8 +861,56 @@ export default function Home() {
     enabled: sceneAutosaveEnabled,
     debounceMs: sceneAutosaveSettings.debounceMs,
     capMs: sceneAutosaveSettings.capMs,
-    preferredSavePath: preferredOverwriteScenePathRef.current,
+    // **Finding N3.** This used to read `preferredOverwriteScenePathRef.current`
+    // — a ref, read during render. Mutating a ref does not re-render, so the
+    // hook kept whatever value happened to be captured at the last unrelated
+    // render. Harmless while autosave wrote to one fixed location; under
+    // sidecars it is a correctness bug, because after a Save As the recovery
+    // file would keep landing beside the *old* project. `activeSceneFilePath` is
+    // state (set on every successful save and on every scene open), so the
+    // sidecar follows the project.
+    preferredSavePath: activeSceneFilePath,
   });
+
+  /**
+   * User-facing scene-save failure (Ph0.1 sub-phase D).
+   *
+   * Two producers, one surface: the 4 GiB VOXL guard rejecting an explicit save
+   * (D1), and a persistently failing autosave (D3 / finding N4). Both were
+   * previously `console.error` into a console the user never opens — and in the
+   * 4 GiB case the alternative was worse than silence, because the writer
+   * wrapped its `u32` offsets and produced a file that parsed and was wrong.
+   */
+  const [sceneSaveError, setSceneSaveError] = React.useState<{
+    title: string;
+    message: string;
+    detail?: string | null;
+  } | null>(null);
+
+  /**
+   * Persistent autosave failure (Ph0.1 D3, finding N4).
+   *
+   * Fires once per outage, after two consecutive failures — one failure is a
+   * transient (antivirus on the destination, a share blinking), two across a
+   * 30 s debounce is a condition. Before this the user's only signal was a
+   * recovery prompt at next launch showing an hour-old timestamp.
+   */
+  React.useEffect(() => {
+    const onAutosaveFailed = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string; lastSuccessAt?: string | null }>).detail;
+      setSceneSaveError({
+        title: 'Autosave is not working',
+        message: detail?.message ?? 'The background recovery save failed repeatedly.',
+        detail: detail?.lastSuccessAt
+          ? `Last successful autosave: ${new Date(detail.lastSuccessAt).toLocaleString()}. Save your project manually.`
+          : 'No autosave has succeeded this session. Save your project manually.',
+      });
+    };
+    window.addEventListener(SCENE_AUTOSAVE_FAILED_EVENT, onAutosaveFailed);
+    return () => window.removeEventListener(SCENE_AUTOSAVE_FAILED_EVENT, onAutosaveFailed);
+  }, []);
+
+  const dismissSceneSaveError = React.useCallback(() => setSceneSaveError(null), []);
 
   // Editor toast/notification subsystem (state, refs, fade/show effects,
   // helpers). Triggers stay in Home and call these returned setters; the
@@ -4036,6 +4097,9 @@ export default function Home() {
   }, [printingArtifact]);
 
   const performTopBarSaveScene = React.useCallback(async (options?: { nativePathOverride?: string | null }) => {
+    // Captured before the save so a Save As can clean up the sidecar beside the
+    // project the user just moved away from.
+    const previousScenePath = activeSceneFilePath;
     const visibleModels = scene.models.filter((model) => model.visible);
     const scopeModels = visibleModels.length > 0 ? visibleModels : scene.models;
     const resolvedNativePath = options?.nativePathOverride !== undefined
@@ -4093,6 +4157,16 @@ export default function Home() {
       // Once a scene has been successfully saved to a concrete VOXL path,
       // future Ctrl+S should keep saving in-place without prompting again.
       preferredOverwriteScenePathRef.current = nextActiveScenePath;
+
+      // Save As moved the project. The recovery file beside the old one is now
+      // an orphan that implies unsaved work which does not exist — and the new
+      // sidecar is about to be written beside the new project. Safe to remove
+      // here specifically because the save above succeeded.
+      if (previousScenePath && previousScenePath !== nextActiveScenePath) {
+        void deleteAutosaveSidecarForProject(previousScenePath).catch((error) => {
+          console.warn('[SceneAutosave] Failed removing the sidecar beside the previous project.', error);
+        });
+      }
     }
     if (savedPath) {
       setExportSuccessToast({ id: Date.now(), path: savedPath });
@@ -4128,8 +4202,10 @@ export default function Home() {
     });
 
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      const bytes = await invoke<ArrayBuffer>('scene_autosave_read_voxl_bytes');
+      // Read exactly the payload discovery resolved — the sidecar beside the
+      // project, or the generic location if that is where the tick fell back to.
+      // The backend re-validates the path against its own candidate list.
+      const bytes = await readAutosaveRecoveryBytes(recoverySnapshot?.voxlPath ?? null);
       const uint8 = new Uint8Array(bytes);
       if (uint8.byteLength === 0) {
         throw new Error('Autosaved VOXL file is empty.');
@@ -4208,6 +4284,26 @@ export default function Home() {
       void performTopBarSaveScene({ nativePathOverride: queuedNativePathOverride })
         .catch((error) => {
           console.error('[SceneSave] Save operation failed.', error);
+          // The 4 GiB ceiling is the case that must never be silent: without a
+          // guard the writer wrapped its u32 offsets and wrote a file that
+          // parsed and was wrong. The typed error carries the measured size and
+          // the per-model breakdown, so the message can say what to remove.
+          setSceneSaveError(
+            error instanceof VoxlSizeLimitError
+              ? {
+                  title: 'Scene is too large to save',
+                  message: error.userMessage,
+                  detail: error.perModelBreakdown
+                    .slice(0, 5)
+                    .map((row) => `${row.name}: ${(row.compressedBytes / (1024 * 1024)).toFixed(0)} MB compressed`)
+                    .join('\n'),
+                }
+              : {
+                  title: 'Could not save the scene',
+                  message: error instanceof Error ? error.message : String(error),
+                  detail: null,
+                },
+          );
         })
         .finally(() => {
           sceneSaveInFlightRef.current = false;
@@ -4355,10 +4451,18 @@ export default function Home() {
     let cancelled = false;
     void (async () => {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const manifest = await invoke<{ savedAt: string; clean: boolean } | null>('scene_autosave_read_manifest');
-        if (!cancelled && manifest && !manifest.clean) {
-          setAutosaveRecovery({ savedAt: manifest.savedAt });
+        // Discovery, not a bare manifest read: the payload may be a sidecar
+        // beside the project, the generic location, or a legacy `scene.voxl`
+        // from before Ph0.1. `resolveAutosaveRecovery` validates that whichever
+        // it finds actually exists and really is a VOXL file, so the prompt is
+        // never offered for a payload that cannot be restored.
+        const candidate = await resolveAutosaveRecovery();
+        if (!cancelled && candidate && !candidate.clean) {
+          setAutosaveRecovery({
+            savedAt: candidate.savedAt ?? new Date().toISOString(),
+            voxlPath: candidate.voxlPath,
+            origin: candidate.origin,
+          });
         }
       } catch {
         // Non-fatal: no autosave recovery available.
@@ -4390,13 +4494,27 @@ export default function Home() {
     }
   }, [isDesktopRuntime]);
 
+  /**
+   * Clean exit. The recovery file is deleted **only** when there is nothing left
+   * to recover.
+   *
+   * The unsaved-changes branch deliberately keeps the sidecar: a user who closes
+   * the app and declines to save has still, on the next launch, a right to the
+   * autosaved copy. Deleting it here would turn "don't save" into "destroy my
+   * recovery too". `handleDiscardAndCloseProgram` retains it for the same
+   * reason; `handleSaveAndCloseProgram` deletes it via `clearAutosave`, but only
+   * after the save has actually succeeded.
+   */
   const handleRequestProgramClose = React.useCallback(() => {
     if (hasUnsavedSceneChangesRef.current) {
       setShowCloseUnsavedChangesModal(true);
       return;
     }
-    void closeDesktopWindowNow();
-  }, [closeDesktopWindowNow]);
+    void (async () => {
+      await clearAutosave();
+      await closeDesktopWindowNow();
+    })();
+  }, [clearAutosave, closeDesktopWindowNow]);
 
   const handleDiscardAndCloseProgram = React.useCallback(() => {
     void (async () => {
@@ -4458,6 +4576,15 @@ export default function Home() {
           }
 
           if (!hasUnsavedSceneChangesRef.current) {
+            // Clean exit with nothing outstanding: take the close over so the
+            // recovery file is actually gone before the process ends. A
+            // fire-and-forget delete here would race the window teardown and
+            // leave a `_autosave.voxl` beside a fully-saved project.
+            event.preventDefault();
+            void (async () => {
+              await clearAutosave();
+              await closeDesktopWindowNow();
+            })();
             return;
           }
 
@@ -4480,7 +4607,7 @@ export default function Home() {
         unlisten();
       }
     };
-  }, [isDesktopRuntime]);
+  }, [clearAutosave, closeDesktopWindowNow, isDesktopRuntime]);
 
   React.useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -10230,6 +10357,8 @@ export default function Home() {
         showPluginImportWarningModal={showPluginImportWarningModal}
         showSceneSaveChoiceModal={showSceneSaveChoiceModal}
         supportsInfoModelId={supportsInfoModelId}
+        sceneSaveError={sceneSaveError}
+        dismissSceneSaveError={dismissSceneSaveError}
         zipPickerResolveRef={zipPickerResolveRef}
         zipPickerState={zipPickerState}
       />

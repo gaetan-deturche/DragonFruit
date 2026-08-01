@@ -69,10 +69,14 @@ test('Static ESLint rule flags violations in forbidden paths and passes allowed 
     const forbiddenFile = join(workspaceRoot, 'src/hotkeys/temp_mock_forbidden.ts');
     const allowedFile = join(workspaceRoot, 'src/hotkeys/temp_mock_allowed.test.ts');
 
+    const eslintBin = join(workspaceRoot, 'node_modules/eslint/bin/eslint.js');
+    const runLint = (filePath: string) =>
+        execSync(`"${process.execPath}" "${eslintBin}" "${filePath}"`, { stdio: 'pipe', env: process.env });
+
     // 1. Test forbidden file (CallExpression)
     writeFileSync(forbiddenFile, "window.addEventListener('keydown', () => {});\n");
     try {
-        execSync(`npx eslint "${forbiddenFile}"`, { stdio: 'pipe' });
+        runLint(forbiddenFile);
         assert.fail('ESLint should have failed for forbidden file CallExpression');
     } catch (err: any) {
         const output = err.stdout?.toString() || err.stderr?.toString() || '';
@@ -87,7 +91,7 @@ test('Static ESLint rule flags violations in forbidden paths and passes allowed 
     // 2. Test forbidden file (AssignmentExpression)
     writeFileSync(forbiddenFile, "document.onkeyup = () => {};\n");
     try {
-        execSync(`npx eslint "${forbiddenFile}"`, { stdio: 'pipe' });
+        runLint(forbiddenFile);
         assert.fail('ESLint should have failed for forbidden file AssignmentExpression');
     } catch (err: any) {
         const output = err.stdout?.toString() || err.stderr?.toString() || '';
@@ -102,7 +106,7 @@ test('Static ESLint rule flags violations in forbidden paths and passes allowed 
     // 3. Test allowed file (CallExpression in a .test.ts file)
     writeFileSync(allowedFile, "window.addEventListener('keydown', () => {});\n");
     try {
-        execSync(`npx eslint "${allowedFile}"`, { stdio: 'pipe' });
+        runLint(allowedFile);
         // Should pass, no error thrown
     } catch (err: any) {
         const output = err.stdout?.toString() || err.stderr?.toString() || '';

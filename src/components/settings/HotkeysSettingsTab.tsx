@@ -21,7 +21,6 @@ const PINNED_SLOT_LABELS: Record<string, string> = {
 const CATEGORY_LABELS: Record<string, string> = {
   GLOBAL: 'General',
   CAMERA: 'Camera',
-  ROTATION: 'Rotation',
   CANVAS: 'Canvas Tools',
   SUPPORTS: 'Supports',
   PRESETS: 'Presets',
@@ -36,8 +35,8 @@ const SECTION_GROUPS: Array<{
   {
     id: 'global',
     title: 'Global',
-    description: 'General, camera, and rotation shortcuts available across all workspaces.',
-    categories: ['GLOBAL', 'CAMERA', 'ROTATION'],
+    description: 'General and camera shortcuts available across all workspaces.',
+    categories: ['GLOBAL', 'CAMERA'],
   },
   {
     id: 'scene',
