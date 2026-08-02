@@ -25,3 +25,8 @@ export function setModelMesh(modelId: string, mesh: THREE.Mesh | null): void {
 export function getModelMesh(modelId: string): THREE.Mesh | null {
     return _meshes.get(modelId) ?? null;
 }
+
+/** Returns all currently-registered model meshes (used for framing/bounds). */
+export function getAllModelMeshes(): THREE.Mesh[] {
+    return [..._meshes.values()];
+}

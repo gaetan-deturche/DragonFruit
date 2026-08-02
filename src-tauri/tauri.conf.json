@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run predev:once && npm run dev",
     "beforeBuildCommand": "npm run build:tauri && node scripts/build-thumbnail-providers.mjs",
-    "devUrl": "http://localhost:3005",
+    "devUrl": "http://localhost:3006",
     "frontendDist": "frontend-dist"
   },
   "bundle": {

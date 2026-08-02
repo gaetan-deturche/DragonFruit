@@ -10,7 +10,7 @@ import type { ModelSizingContext } from './parameterSizing';
 import { getSettings } from '../Settings/state';
 import { getSnapshot, addRoot, addTrunk, addBranch, addLeaf, addKnot, addAnchor, addStick, addTwig } from '../state';
 import type { DetectedIsland } from '../../volumeAnalysis/Islands/types';
-import { buildTrunkData } from '../SupportTypes/Trunk/trunkBuilder';
+import { buildTrunkData, buildEscapeTrunkData } from '../SupportTypes/Trunk/trunkBuilder';
 import { buildCavityStick } from '../SupportTypes/Trunk/useTrunkPlacement';
 import { buildBranchData } from '../SupportTypes/Branch/branchBuilder';
 import { buildLeafData } from '../SupportTypes/Leaf/leafBuilder';
@@ -585,6 +585,18 @@ function placeOneCandidate(
                     return { kind: 'twig', preset };
                 }
             }
+            // Angled-escape trunk: tilt the shaft outward to clear the model and
+            // reach the plate where a vertical/A*-routed trunk could not.
+            const escape = buildEscapeTrunkData({
+                tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides, isPreview: false,
+            });
+            if (!escape.error) {
+                addRoot(escape.root);
+                addTrunk(escape.trunk);
+                console.log(LOG_PREFIX,
+                    `Escape trunk (tilted) ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
+                return { kind: 'trunk', preset, entityId: escape.trunk.id };
+            }
         }
         console.log(LOG_PREFIX,
             `Rejected ${candidate.id} (${candidate.source}): trunk build error "${trunkResult.error}" ` +
@@ -694,6 +706,30 @@ function placeOneCandidate(
  * preferred grid node is already occupied will automatically become a
  * branch or leaf of the existing trunk.
  */
+/** Actual solid volume of a mesh in world mm³ (signed-tetrahedron sum × scale³). */
+function computeMeshVolumeMm3(mesh: THREE.Mesh): number {
+    const geom = mesh.geometry;
+    const pos = geom.getAttribute('position');
+    if (!pos) return 0;
+    const index = geom.index;
+    let sixV = 0;
+    const tet = (ia: number, ib: number, ic: number) => {
+        const x1 = pos.getX(ia), y1 = pos.getY(ia), z1 = pos.getZ(ia);
+        const x2 = pos.getX(ib), y2 = pos.getY(ib), z2 = pos.getZ(ib);
+        const x3 = pos.getX(ic), y3 = pos.getY(ic), z3 = pos.getZ(ic);
+        sixV += x1 * (y2 * z3 - z2 * y3) - y1 * (x2 * z3 - z2 * x3) + z1 * (x2 * y3 - y2 * x3);
+    };
+    if (index) {
+        for (let i = 0; i < index.count; i += 3) tet(index.getX(i), index.getX(i + 1), index.getX(i + 2));
+    } else {
+        for (let i = 0; i < pos.count; i += 3) tet(i, i + 1, i + 2);
+    }
+    const localVol = Math.abs(sixV) / 6;
+    const s = new THREE.Vector3();
+    mesh.matrixWorld.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+    return localVol * Math.abs(s.x * s.y * s.z);
+}
+
 export function runAutoPlace(
     islands: DetectedIsland[],
     modelId: string,
@@ -783,6 +819,7 @@ export function runAutoPlace(
         `Mesh for ${modelId}: ${mesh ? 'available (pathfinding + SDF active)' : 'UNAVAILABLE (supports route straight, no collision avoidance)'}`);
 
 
+
     const gridEnabled = getSettings().grid?.enabled;
     console.log(LOG_PREFIX,
         `Grid mode: ${gridEnabled ? 'ENABLED (supports share grid nodes, branch/leaf fan-out active)' : 'DISABLED (all supports become standalone trunks)'}`);
@@ -797,11 +834,13 @@ export function runAutoPlace(
 
     let modelCtx: ModelSizingContext | undefined;
     if (mesh) {
-        const bbox = new THREE.Box3().setFromObject(mesh);
-        const size = new THREE.Vector3();
-        bbox.getSize(size);
         modelCtx = {
-            modelVolumeMm3: size.x * size.y * size.z,
+            // ACTUAL mesh volume, not the bounding-box volume. For a tilted model
+            // the bbox can be several times the real volume, which over-estimates
+            // weight and inflates every support's shaft diameter (→ fat trunks
+            // whose contact cones then penetrate the model). Volume is rotation-
+            // invariant, so this also makes sizing independent of orientation.
+            modelVolumeMm3: computeMeshVolumeMm3(mesh),
             totalCandidates: candidates.length,
             candidatesBelowZ: 0, // placeholder — filled per-candidate below
         };
@@ -818,31 +857,22 @@ export function runAutoPlace(
     const presets = { detail: 0, structure: 0, anchor: 0 };
     const rejectionReasons: Record<string, number> = {};
 
-    // Pre-compute cluster totals: for each candidate, sum the areas
-    // of all candidates within merge radius.  Core trunks get sized
-    // for their full cluster, not just their own tiny island.
-    const clusterTotal = new Map<string, number>();
-    const mergeR2 = GRIDLESS_MERGE_RADIUS_MM * GRIDLESS_MERGE_RADIUS_MM;
-    for (const c of candidates) {
-        let total = c.islandAreaMm2;
-        for (const other of candidates) {
-            if (other.id === c.id) continue;
-            const dx = c.tipPos.x - other.tipPos.x;
-            const dy = c.tipPos.y - other.tipPos.y;
-            const dz = c.tipPos.z - other.tipPos.z;
-            if (dx * dx + dy * dy + dz * dz <= mergeR2) {
-                total += other.islandAreaMm2;
-            }
-        }
-        clusterTotal.set(c.id, total);
-    }
+    // Each support is sized for its OWN contact area only. Previously we summed
+    // the areas of every candidate within GRIDLESS_MERGE_RADIUS_MM ("cluster
+    // total") and sized every trunk for that — but the code passed it to ALL
+    // trunks, including standalone ones (contradicting the documented intent),
+    // and the cluster included candidates that end up REJECTED and are never
+    // actually supported. In dense regions that inflated the load ~6×, saturating
+    // the diameter to the 2mm cap → fat trunks that both reject (can't seed under
+    // the model) and let their contact cone penetrate. Sizing on own area lets a
+    // trunk that genuinely hosts branches/leaves be re-sized later if needed.
 
     for (const candidate of candidates) {
         try {
             const ctx: ModelSizingContext | undefined = modelCtx
                 ? { ...modelCtx, candidatesBelowZ: belowCount.get(candidate.id) ?? candidates.length }
                 : undefined;
-            const result = placeOneCandidate(candidate, settingsOverride, ctx, clusterTotal.get(candidate.id));
+            const result = placeOneCandidate(candidate, settingsOverride, ctx, candidate.islandAreaMm2);
             switch (result.kind) {
                 case 'trunk':   placedTrunks++; break;
                 case 'anchor':  placedAnchors++; break;

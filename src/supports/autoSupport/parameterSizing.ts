@@ -119,8 +119,9 @@ export function sizeParameters(
     const loadN = candidate.source === 'minima' ? rawLoadN * 1.5 : rawLoadN;
 
     // Shaft diameter: scales with sqrt(load), floored at MIN.
+    const sizingMultiplier = clamp(Math.sqrt(loadN) * 1.2, 0.8, 2.0);
     const shaftDiameterMm = round(
-        clamp(shaftBase * clamp(Math.sqrt(loadN) * 1.2, 0.8, 2.0), MIN_SHAFT_DIAMETER_MM, MAX_SHAFT_DIAMETER_MM),
+        clamp(shaftBase * sizingMultiplier, MIN_SHAFT_DIAMETER_MM, MAX_SHAFT_DIAMETER_MM),
     3);
 
     // Tip contact: scaled by island area, but never thinner than 30%

@@ -17,6 +17,7 @@ import { getSettings } from '../../Settings';
 import type { SupportData } from '../../rendering/SupportBuilder';
 import { calculateStandardPlacement, type TrunkPlacementResult } from '../../PlacementLogic/StandardPlacement';
 import { calculateSmartPlacementV2 } from '../../PlacementLogic/Pathfinding';
+import { isShaftBlocked } from '../../PlacementLogic/CollisionAvoidance';
 import type { LimitationCode, WarningCode } from '../../types';
 import type { SnappedTrunkRouteResult, TrunkRouteResult } from './trunkRouteTypes';
 import { gridSnappedXYFromKey } from '../../PlacementLogic/Grid/gridMath';
@@ -275,7 +276,10 @@ export function buildTrunkData(input: TrunkBuildInput): TrunkBuildResult {
             placement = cached;
         } else {
             perfMark('trunk:v2-placement');
-            const result = calculateSmartPlacementV2({ ...placementInput, mesh, modelId }, v2Context);
+            const result = calculateSmartPlacementV2(
+                { ...placementInput, mesh, modelId, shaftDiameterMm: overrides?.shaftDiameterMm },
+                v2Context,
+            );
             perfMeasureWithSpike('trunk:v2-placement', 'trunk:v2-placement');
             placement = result;
             if (cacheKey) {
@@ -290,6 +294,94 @@ export function buildTrunkData(input: TrunkBuildInput): TrunkBuildResult {
     const built = buildTrunkDataFromPlacement(input, placement);
     perfMeasureWithSpike('trunk:build-from-placement', 'trunk:build-from-placement');
     return built;
+}
+
+/**
+ * Angled-escape fallback for underbelly contact points.
+ *
+ * When the normal (vertical/A*-routed) trunk can't reach the build plate because
+ * the model sits directly below the contact — a COLLISION_WITH_MODEL the
+ * pathfinder couldn't resolve — this tries a single straight but TILTED shaft:
+ * the contact cone stays on the surface normal, but the plate base is offset
+ * outward (along the surface normal's horizontal direction, with a few yaw/tilt
+ * variations) so the shaft runs clear of the model down to the plate.
+ *
+ * A collinear construction joint is authored on the base→socket line so the
+ * built shaft is a single straight tilted segment — exactly the segment the
+ * collision test below clears (the default central joint would instead kink the
+ * shaft vertical-then-diagonal, which the straight-line test would not match).
+ *
+ * Returns a normal TrunkBuildResult on success, or one with error
+ * 'COLLISION_WITH_MODEL' if no clear tilt/direction was found.
+ */
+export function buildEscapeTrunkData(input: TrunkBuildInput): TrunkBuildResult {
+    const { tipPos, tipNormal, mesh, overrides } = input;
+    const settings = getSettings();
+    const tipProfile = buildTipProfile(settings, overrides);
+    const diskHeight = overrides?.rootsDiskHeightMm ?? settings.roots.diskHeightMm;
+    const coneHeight = overrides?.rootsConeHeightMm ?? settings.roots.coneHeightMm;
+    const rootsTopZ = diskHeight + coneHeight;
+    const shaftRadius = (overrides?.shaftDiameterMm ?? settings.shaft.diameterMm) / 2;
+
+    // Anchor the shaft top at the standard socket (contact cone stays on-normal).
+    const base = calculateStandardPlacement({ tipPos, tipNormal, tipProfile, rootsTopZ });
+    const socketPos = base.socketPos;
+    const fail = (): TrunkBuildResult =>
+        buildTrunkDataFromPlacement(input, { ...base, error: 'COLLISION_WITH_MODEL' });
+
+    // Horizontal escape direction = outward-facing part of the surface normal.
+    const hLen = Math.hypot(tipNormal.x, tipNormal.y);
+    const runZ = socketPos.z - rootsTopZ; // vertical rise available to tilt over
+    if (!mesh || hLen < 1e-3 || runZ < 2) {
+        // Near-vertical normal or too little height to tilt into — escape can't help.
+        return fail();
+    }
+    const hx = tipNormal.x / hLen;
+    const hy = tipNormal.y / hLen;
+
+    const clearanceR = shaftRadius + 0.2;
+    const TILTS_DEG = [18, 26, 34, 42, 48];
+    const YAWS_DEG = [0, 22, -22, 44, -44];
+
+    for (const tiltDeg of TILTS_DEG) {
+        const offset = runZ * Math.tan((tiltDeg * Math.PI) / 180);
+        for (const yawDeg of YAWS_DEG) {
+            const yaw = (yawDeg * Math.PI) / 180;
+            const cos = Math.cos(yaw);
+            const sin = Math.sin(yaw);
+            const dx = hx * cos - hy * sin;
+            const dy = hx * sin + hy * cos;
+            const shaftBottom: Vec3 = {
+                x: socketPos.x + dx * offset,
+                y: socketPos.y + dy * offset,
+                z: rootsTopZ,
+            };
+            if (isShaftBlocked(shaftBottom, socketPos, clearanceR, mesh)) continue;
+
+            // Clear tilted lane found — author a single straight tilted shaft.
+            const basePos: Vec3 = { x: shaftBottom.x, y: shaftBottom.y, z: 0 };
+            const t = 0.6;
+            const midJoint: Vec3 = {
+                x: shaftBottom.x + (socketPos.x - shaftBottom.x) * t,
+                y: shaftBottom.y + (socketPos.y - shaftBottom.y) * t,
+                z: shaftBottom.z + (socketPos.z - shaftBottom.z) * t,
+            };
+            const placement: TrunkPlacementResult = {
+                basePos,
+                socketPos,
+                unsnappedBottomPos: basePos,
+                snappedNodeKey: null,
+                joints: [],
+                constructionJoints: [midJoint],
+                error: undefined,
+                warning: base.warning,
+                angle: base.angle,
+                coneAxis: base.coneAxis,
+            };
+            return buildTrunkDataFromPlacement(input, placement);
+        }
+    }
+    return fail();
 }
 
 export function buildTrunkDataFromPlacement(input: TrunkBuildInput, placement: TrunkPlacementResult): TrunkBuildResult {

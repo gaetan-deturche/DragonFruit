@@ -217,6 +217,8 @@ import { useIslandManager } from '@/volumeAnalysis/IslandScan/useIslandManager';
 import { useIslands } from '@/volumeAnalysis/Islands/useIslands';
 import { IslandsPanel } from '@/components/controls/IslandsPanel';
 import { AutoSupportPanel, getAutoSupportBusy, subscribeAutoSupportBusy, autoSupportDrivingScan } from '@/components/controls/AutoSupportPanel';
+import { useAutomationBridge } from '@/automation/useAutomationBridge';
+import { getModelMesh } from '@/supports/autoSupport/meshStore';
 import { IslandOverlay } from '@/components/scene/IslandOverlay';
 import { useSupportInteractionManager } from '@/features/supports/useSupportInteractionManager';
 import { useUndoRedoHotkeys } from '@/hotkeys/useUndoRedoHotkeys';
@@ -299,7 +301,7 @@ import {
   getSavedUvToolsSettings,
   resolveUvToolsExecutablePath,
 } from '@/components/settings/uvToolsPreferences';
-import { subscribe as subscribeSupportState, getSnapshot as getSupportSnapshot, toggleSegmentCurve, transformSupportsForModel, updateTrunk, updateBranch, updateTwig, updateStick } from '@/supports/state';
+import { subscribe as subscribeSupportState, getSnapshot as getSupportSnapshot, setSnapshot as setSupportSnapshot, toggleSegmentCurve, transformSupportsForModel, updateTrunk, updateBranch, updateTwig, updateStick } from '@/supports/state';
 import {
   getKickstandSnapshot,
   subscribeToKickstandStore,
@@ -6935,6 +6937,53 @@ export default function Home() {
     plateZ: 0,
     sourcePath: scene.activeModel?.sourcePath,
     activeTab: scene.mode,
+  });
+
+  // Automation bridge — lets the DragonFruit MCP server drive auto-support and
+  // model placement for scripted testing (dev/automation builds only; no-op
+  // otherwise).
+  useAutomationBridge({
+    getActiveModelId: () => scene.activeModelId ?? null,
+    getIslands: () => islandsPoc.filteredIslands,
+    loadModel: async (path) => {
+      const name = path.split(/[\\/]/).pop() || 'model.stl';
+      const file = new File([], name, { lastModified: Date.now() });
+      (file as File & { filePath?: string }).filePath = path;
+      await handleDroppedPrepareFiles([file], { prearmedLoadingUi: true });
+    },
+    clearSupports: () => {
+      const s = getSupportSnapshot();
+      setSupportSnapshot({
+        ...s,
+        trunks: {}, roots: {}, branches: {}, leaves: {}, anchors: {},
+        braces: {}, knots: {}, twigs: {}, sticks: {},
+      });
+    },
+    transform: {
+      get: () => {
+        const t = transformMgr.transform;
+        return {
+          position: { x: t.position.x, y: t.position.y, z: t.position.z },
+          rotationRad: { x: t.rotation.x, y: t.rotation.y, z: t.rotation.z },
+          scale: { x: t.scale.x, y: t.scale.y, z: t.scale.z },
+        };
+      },
+      setPosition: (x, y, z) => transformMgr.transformHook.setPosition(x, y, z),
+      setRotationRad: (x, y, z) => transformMgr.transformHook.setRotation(x, y, z),
+      setScale: (x, y, z) => transformMgr.transformHook.setScale(x, y, z),
+      centerXY: () => transformMgr.transformHook.centerXY(),
+      elevate: (mm) => {
+        const mesh = getModelMesh(scene.activeModelId ?? '');
+        if (!mesh) return;
+        mesh.updateMatrixWorld();
+        const lowestZ = new THREE.Box3().setFromObject(mesh).min.z;
+        transformMgr.transformHook.snapToLift(lowestZ, mm);
+      },
+      reset: () => {
+        transformMgr.transformHook.resetPosition();
+        transformMgr.transformHook.resetRotation();
+      },
+    },
   });
 
   // 5. Supports

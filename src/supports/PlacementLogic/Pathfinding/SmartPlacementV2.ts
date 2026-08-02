@@ -53,6 +53,10 @@ import {
 export interface SmartPlacementV2Input extends TrunkPlacementInput {
     mesh: THREE.Mesh;
     modelId: string;
+    /** Actual (auto-sized) shaft diameter this support will be RENDERED at, in mm.
+     *  Collision/clearance must use this — not the nominal settings diameter —
+     *  or an auto-sized fat trunk gets validated thin and penetrates the model. */
+    shaftDiameterMm?: number;
 }
 
 export interface SmartPlacementV2Context {
@@ -1837,7 +1841,11 @@ export function calculateSmartPlacementV2(
     const { mesh, modelId } = input;
     const settings = getSettings();
     const routingAlgorithm = 'potential'; // permanent default
-    const shaftRadius = settings.shaft.diameterMm / 2;
+    // Use the ACTUAL rendered shaft diameter (auto-sized override) so collision
+    // clearance matches the geometry that gets drawn. Falling back to the nominal
+    // settings diameter would validate a fat auto-sized trunk as if it were thin,
+    // letting it penetrate the model.
+    const shaftRadius = (input.shaftDiameterMm ?? settings.shaft.diameterMm) / 2;
     const debugEnabled = getSupportPathfindingDebugEnabled();
     const debugTuningEnabled = getSupportPathfindingDebugTuningEnabled();
     const debugAutoTuneProfile = combineDebugAutoTuneProfiles(

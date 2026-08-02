@@ -71,6 +71,7 @@ import {
 } from '@/features/mesh-smoothing/meshSmoothingEngine';
 import { useSupportDragDeltaBridge } from './useSupportDragDeltaBridge';
 import { useExportThumbnailCapture, type ExportThumbnailRenderOptions } from './useExportThumbnailCapture';
+import { AutomationSceneHooks } from '@/automation/AutomationSceneHooks';
 import {
   buildBoxWireframePositions,
   buildEmptyCornerOnlyWireframePositions,
@@ -5364,9 +5365,10 @@ export function SceneCanvas({
         camera={defaultCamera}
         shadows={!isLinux}
         dpr={dynamicDpr}
-        gl={{ stencil: true, logarithmicDepthBuffer: false, powerPreference: 'high-performance' }}
+        gl={{ stencil: true, logarithmicDepthBuffer: false, powerPreference: 'high-performance', preserveDrawingBuffer: true }}
         onPointerMissed={handleScenePointerMissed}
       >
+        <AutomationSceneHooks />
         <SceneRenderBindings
           rendererRef={rendererRef}
           sceneRef={sceneRef}
