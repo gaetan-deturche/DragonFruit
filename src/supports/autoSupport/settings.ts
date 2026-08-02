@@ -65,7 +65,7 @@ export const AUTO_SUPPORT_CONSTRAINTS = {
     minTrunkSeparationMm: { min: 3, max: 30, step: 0.5, defaultValue: 6 },
     densityFactor: { min: 0.5, max: 3.0, step: 0.1, defaultValue: 1.0 },
     tipInfluenceRadiusMm: { min: 0.1, max: 10, step: 0.1, defaultValue: 0.5 },
-    overhangAngleThresholdDeg: { min: 20, max: 80, step: 1, defaultValue: 45 },
+    overhangAngleThresholdDeg: { min: 20, max: 80, step: 1, defaultValue: 60 },
     overhangSpacingMm: { min: 1.5, max: 12, step: 0.5, defaultValue: 4 },
     maxAttachmentsPerTrunk: { min: 2, max: 50, step: 1, defaultValue: 12, integer: true },
     maxVerticalAttachmentDistanceMm: { min: 5, max: 80, step: 1, defaultValue: 40 },

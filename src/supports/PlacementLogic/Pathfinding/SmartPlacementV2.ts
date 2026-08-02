@@ -691,6 +691,56 @@ function createContactConeBlockedMemo(args: {
     };
 }
 
+/**
+ * Lateral ring sample for a cone-clear socket. The gradient march in
+ * {@link findContactConeClearSocketSeed} descends along the SDF gradient, which
+ * for a contact UNDER an overhang stays trapped beneath the model (the nearest
+ * surface is the contact face itself). This instead samples socket directions
+ * spread around the surface normal — azimuths × polar angles up to the disk
+ * angle limit — and returns the first clear one (smallest polar angle first, so
+ * the contact stays as square to the surface as possible). That gives the A* a
+ * clear seed it can route laterally out and down to the build plate.
+ */
+function sampleLateralConeSeed(args: {
+    tip: Vec3;
+    normal: THREE.Vector3;
+    L_nominal: number;
+    L_max: number;
+    maxRadius: number;
+    contactConeBlockedAt: ContactConeBlockedAt;
+}): Vec3 | null {
+    const N = args.normal;
+    const T = args.tip;
+    // Orthonormal tangent basis perpendicular to N.
+    const t1 = Math.abs(N.x) > 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    t1.sub(N.clone().multiplyScalar(t1.dot(N))).normalize();
+    const t2 = new THREE.Vector3().crossVectors(N, t1).normalize();
+
+    const phisDeg = [25, 40, 52, 63, 72]; // polar angle from N, below the 78° disk limit
+    const azimuthCount = 12;
+    const lengths = [args.L_nominal, (args.L_nominal + args.L_max) / 2, args.L_max];
+
+    for (const L of lengths) {
+        for (const phiDeg of phisDeg) {
+            const phi = (phiDeg * Math.PI) / 180;
+            const cosP = Math.cos(phi);
+            const sinP = Math.sin(phi);
+            for (let a = 0; a < azimuthCount; a++) {
+                const psi = (a / azimuthCount) * Math.PI * 2;
+                const dx = N.x * cosP + (t1.x * Math.cos(psi) + t2.x * Math.sin(psi)) * sinP;
+                const dy = N.y * cosP + (t1.y * Math.cos(psi) + t2.y * Math.sin(psi)) * sinP;
+                const dz = N.z * cosP + (t1.z * Math.cos(psi) + t2.z * Math.sin(psi)) * sinP;
+                const S: Vec3 = { x: T.x + dx * L, y: T.y + dy * L, z: T.z + dz * L };
+                if (Math.hypot(S.x - T.x, S.y - T.y) > args.maxRadius) continue;
+                if (!args.contactConeBlockedAt(S)) {
+                    return S; // first clear = smallest polar angle at this length
+                }
+            }
+        }
+    }
+    return null;
+}
+
 function findContactConeClearSocketSeed(args: {
     socketPos: Vec3;
     maxTotalLateralMm: number;
@@ -788,8 +838,21 @@ function findContactConeClearSocketSeed(args: {
         }
     }
 
+    // If the gradient march is still blocked (typical for contacts trapped
+    // under an overhang), fall back to a lateral ring sample around the normal.
     if (args.contactConeBlockedAt(currentPos)) {
-        return null; // still blocked after gradient march
+        const lateral = sampleLateralConeSeed({
+            tip: T,
+            normal: N,
+            L_nominal,
+            L_max,
+            maxRadius,
+            contactConeBlockedAt: args.contactConeBlockedAt,
+        });
+        if (!lateral) {
+            return null; // still blocked after gradient march + ring sample
+        }
+        currentPos = lateral;
     }
 
     const metrics = getContactConeRescuePenaltyMetrics({

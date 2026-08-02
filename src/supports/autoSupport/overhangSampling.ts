@@ -16,6 +16,62 @@ import type { AutoSupportSettings } from './settings';
  * All coordinates are returned in WORLD space (matrixWorld applied), so the
  * candidates lie exactly on the displayed mesh surface — no snapping needed.
  */
+/**
+ * The model's lowest point(s) are the critical print anchors: in bottom-up SLA
+ * they cure first and the whole part hangs from them, so they MUST be supported
+ * or the print detaches. Triangle-centroid overhang sampling never lands on a
+ * down-pointing vertex (the centroid always sits above it), so this emits an
+ * explicit candidate at every vertex within `bandMm` of the global minimum world
+ * Z. Normal points straight down — the space directly below the lowest point of
+ * a model is always clear, so a straight trunk to the plate is guaranteed.
+ */
+export function generateLowestPointCandidates(
+    mesh: THREE.Mesh,
+    modelId: string,
+    bandMm = 0.6,
+    spacingMm = 2,
+): CandidatePoint[] {
+    const geom = mesh.geometry;
+    const pos = geom.getAttribute('position') as THREE.BufferAttribute | undefined;
+    if (!pos) return [];
+    mesh.updateMatrixWorld();
+    const mw = mesh.matrixWorld;
+    const v = new THREE.Vector3();
+
+    let minZ = Infinity;
+    for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(mw);
+        if (v.z < minZ) minZ = v.z;
+    }
+    if (!isFinite(minZ)) return [];
+
+    const spacing = Math.max(0.5, spacingMm);
+    const cells = new Map<string, { x: number; y: number; z: number }>();
+    for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(mw);
+        if (v.z > minZ + bandMm) continue;
+        const key = `${Math.round(v.x / spacing)},${Math.round(v.y / spacing)}`;
+        const ex = cells.get(key);
+        if (!ex || v.z < ex.z) cells.set(key, { x: v.x, y: v.y, z: v.z });
+    }
+
+    const out: CandidatePoint[] = [];
+    for (const [key, c] of cells) {
+        out.push({
+            id: `lowest-${modelId}-${key}`,
+            tipPos: { x: c.x, y: c.y, z: c.z },
+            tipNormal: { x: 0, y: 0, z: -1 },
+            modelId,
+            source: 'minima',
+            islandAreaMm2: spacing * spacing * 0.5,
+            zHeight: c.z,
+            overhangAngleDeg: 180,
+            priority: 1000,
+        });
+    }
+    return out;
+}
+
 export function generateOverhangCandidates(
     mesh: THREE.Mesh,
     settings: AutoSupportSettings,

@@ -20,7 +20,7 @@ import { isShaftBlocked } from '../PlacementLogic/CollisionAvoidance';
 import { runAutoBracing } from '../autoBracing/autoBrace';
 import { pushHistory } from '@/history/historyStore';
 import { getModelMesh } from './meshStore';
-import { generateOverhangCandidates } from './overhangSampling';
+import { generateOverhangCandidates, generateLowestPointCandidates } from './overhangSampling';
 
 const LOG_PREFIX = '[AutoSupport]';
 
@@ -793,6 +793,21 @@ export function runAutoPlace(
     // ------------------------------------------------------------------
     // 2b. Filter out already-supported positions
     // ------------------------------------------------------------------
+
+    // Guarantee the model's lowest point(s) get supported — the critical print
+    // anchors. Triangle-centroid overhang sampling never lands on the down-pointing
+    // vertex, so add explicit anchor candidates and process them FIRST (prepend),
+    // before neighbours occupy the grid. Without this the lowest point can be left
+    // unsupported, making the part impossible to print.
+    const anchorMesh = getModelMesh(modelId);
+    if (anchorMesh) {
+        const anchors = generateLowestPointCandidates(anchorMesh, modelId, 5, 2)
+            .map((c): CandidatePoint => ({ ...c, modelId }));
+        if (anchors.length > 0) {
+            candidates = [...anchors, ...candidates];
+            console.log(LOG_PREFIX, `Lowest-point anchors: +${anchors.length} (critical print anchors)`);
+        }
+    }
 
     const beforeSupportFilter = candidates.length;
     candidates = filterAlreadySupported(candidates);
