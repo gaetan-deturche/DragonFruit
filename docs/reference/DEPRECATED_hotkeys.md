@@ -2,7 +2,7 @@
 
 > [!WARNING]
 > This document is deprecated. Use centralized hotkey system.
-> See new spec: [docs/hotkeys/README.md]
+> See new spec: [docs/reference/hotkeys.md]
 This page summarizes support-placement hotkey behavior.
 
 ## Precedence

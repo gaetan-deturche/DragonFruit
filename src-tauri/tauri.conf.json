@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DragonFruit",
-  "version": "0.1.9",
+  "version": "0.1.12",
   "identifier": "org.openresinalliance.dragonfruit",
   "build": {
     "beforeDevCommand": "npm run predev:once && npm run dev",
     "beforeBuildCommand": "npm run build:tauri && node scripts/build-thumbnail-providers.mjs",
-    "devUrl": "http://localhost:3005",
+    "devUrl": "http://localhost:3006",
     "frontendDist": "frontend-dist"
   },
   "bundle": {
@@ -75,7 +75,7 @@
         "height": 800,
         "minWidth": 960,
         "minHeight": 600,
-        "maximized": true,
+        "maximized": false,
         "resizable": true,
         "decorations": true,
         "hiddenTitle": true,

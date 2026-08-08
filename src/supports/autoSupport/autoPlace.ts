@@ -1,0 +1,1317 @@
+import * as THREE from 'three';
+import type { CandidatePoint, AutoPlaceResult, AutoPlaceAnalytics, RejectReason } from './types';
+
+function round2(v: number): number { return Math.round(v * 100) / 100; }
+import type { AutoSupportSettings } from './settings';
+import { normalizeAutoSupportSettings } from './settings';
+import { generateCandidates, deduplicateCandidates } from './candidateGeneration';
+import { sizeParameters } from './parameterSizing';
+import type { ModelSizingContext } from './parameterSizing';
+import { getSettings } from '../Settings/state';
+import { getSnapshot, addRoot, addTrunk, addBranch, addLeaf, addKnot, addAnchor, addStick, addTwig } from '../state';
+import type { DetectedIsland } from '../../volumeAnalysis/Islands/types';
+import { buildTrunkData, buildEscapeTrunkData } from '../SupportTypes/Trunk/trunkBuilder';
+import { buildCavityStick } from '../SupportTypes/Trunk/useTrunkPlacement';
+import { buildBranchData } from '../SupportTypes/Branch/branchBuilder';
+import { buildLeafData } from '../SupportTypes/Leaf/leafBuilder';
+import { decideGridPlacement } from '../PlacementLogic/Grid/gridPlacement';
+import { calculateSmoothedNormal } from '../PlacementLogic/PlacementUtils';
+import { isShaftBlocked } from '../PlacementLogic/CollisionAvoidance';
+import { runAutoBracing } from '../autoBracing/autoBrace';
+import { pushHistory } from '@/history/historyStore';
+import { getModelMesh } from './meshStore';
+import { generateOverhangCandidates, generateLowestPointCandidates } from './overhangSampling';
+
+const LOG_PREFIX = '[AutoSupport]';
+
+// ---------------------------------------------------------------------------
+// History action type
+// ---------------------------------------------------------------------------
+
+const SUPPORT_AUTO_PLACE = 'support:auto-place' as const;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeResult(
+    trunks: number,
+    anchors: number,
+    branches: number,
+    leaves: number,
+    sticks: number,
+    rejected: number,
+    changed: boolean,
+    message: string,
+): AutoPlaceResult {
+    return {
+        placedTrunks: trunks,
+        placedAnchors: anchors,
+        placedBranches: branches,
+        placedLeaves: leaves,
+        placedSticks: sticks,
+        rejectedCandidates: rejected,
+        changed,
+        message,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Normal resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the real surface normal at a candidate's tip position by
+ * raycasting against the model mesh — exactly the same way manual
+ * placement obtains a surface normal from a click intersection.
+ *
+ * Falls back to the candidate's existing tipNormal when the mesh is
+ * unavailable or the raycast misses.
+ */
+function resolveSurfaceNormal(
+    tipPos: CandidatePoint['tipPos'],
+    mesh: THREE.Mesh | undefined,
+): { point: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } } {
+    if (!mesh) {
+        return { point: tipPos, normal: { x: 0, y: 0, z: -1 } };
+    }
+
+    const raycaster = new THREE.Raycaster();
+
+    // Downward ray from just above the candidate — catches up-facing surfaces.
+    raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z + 2), new THREE.Vector3(0, 0, -1));
+    const hitsDown = raycaster.intersectObject(mesh, false);
+
+    // Upward ray from just below the candidate — catches down-facing surfaces.
+    // NOTE: use a fresh intersect call; do NOT reuse the raycaster state for the
+    // down ray afterwards (the previous implementation clobbered the down ray).
+    raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z - 2), new THREE.Vector3(0, 0, 1));
+    const hitsUp = raycaster.intersectObject(mesh, false);
+
+    const down = hitsDown[0];
+    const up = hitsUp[0];
+
+    // Pick whichever surface is actually closest to the candidate tip in Z
+    // (both rays are vertical, so |hit.z - tip.z| is the true surface distance).
+    let useUp: boolean;
+    if (down && up) {
+        useUp = Math.abs(up.point.z - tipPos.z) <= Math.abs(down.point.z - tipPos.z);
+    } else {
+        useUp = !down;
+    }
+
+    const hit = useUp ? up : down;
+    if (hit) {
+        const smoothed = calculateSmoothedNormal(hit);
+        // Down ray hits an up-facing surface → normal already points up/out.
+        // Up ray hits a down-facing surface → flip so the normal points down/out,
+        // toward the incoming support below.
+        const normal = useUp
+            ? { x: -smoothed.x, y: -smoothed.y, z: -smoothed.z }
+            : smoothed;
+        return {
+            point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+            normal,
+        };
+    }
+
+    // Off-silhouette contact (e.g. an island contact snapped slightly outside
+    // the mesh): both vertical rays miss. Rather than float, shoot from the
+    // contact toward the mesh centre and snap onto the nearest surface so the
+    // support still attaches.
+    const box = new THREE.Box3().setFromObject(mesh);
+    const centre = box.getCenter(new THREE.Vector3());
+    const toCentre = new THREE.Vector3(centre.x - tipPos.x, centre.y - tipPos.y, centre.z - tipPos.z);
+    if (toCentre.lengthSq() > 1e-6) {
+        toCentre.normalize();
+        raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z), toCentre);
+        const hitsC = raycaster.intersectObject(mesh, false);
+        if (hitsC.length > 0) {
+            const hit = hitsC[0];
+            const smoothed = calculateSmoothedNormal(hit);
+            // Point the normal back toward the incoming support (opposite the
+            // ray direction we cast into the surface).
+            const dot = smoothed.x * toCentre.x + smoothed.y * toCentre.y + smoothed.z * toCentre.z;
+            const facing = dot > 0
+                ? { x: -smoothed.x, y: -smoothed.y, z: -smoothed.z }
+                : smoothed;
+            return { point: { x: hit.point.x, y: hit.point.y, z: hit.point.z }, normal: facing };
+        }
+    }
+
+    // Fallback: keep the existing normal.
+    return { point: tipPos, normal: { x: 0, y: 0, z: -1 } };
+}
+
+// ---------------------------------------------------------------------------
+// Already-supported filter
+// ---------------------------------------------------------------------------
+
+/** Distance within which a candidate is considered already supported. */
+const ALREADY_SUPPORTED_RADIUS_MM = 3.0;
+
+/**
+ * Remove candidates whose tip position is already covered by an
+ * existing support (any trunk / branch / leaf / anchor contact cone).
+ * Prevents stacking duplicate supports on repeated runs.
+ */
+function filterAlreadySupported(candidates: CandidatePoint[]): CandidatePoint[] {
+    const snapshot = getSnapshot();
+    const existingTips: Array<{ x: number; y: number; z: number }> = [];
+
+    for (const t of Object.values(snapshot.trunks)) {
+        if (t.contactCone?.pos) existingTips.push(t.contactCone.pos);
+    }
+    for (const b of Object.values(snapshot.branches)) {
+        if (b.contactCone?.pos) existingTips.push(b.contactCone.pos);
+    }
+    for (const l of Object.values(snapshot.leaves)) {
+        if (l.contactCone?.pos) existingTips.push(l.contactCone.pos);
+    }
+    for (const a of Object.values(snapshot.anchors)) {
+        if (a.contactCone?.pos) existingTips.push(a.contactCone.pos);
+    }
+
+    if (existingTips.length === 0) return candidates;
+
+    const r2 = ALREADY_SUPPORTED_RADIUS_MM * ALREADY_SUPPORTED_RADIUS_MM;
+    return candidates.filter(c => {
+        for (const tip of existingTips) {
+            const dx = c.tipPos.x - tip.x;
+            const dy = c.tipPos.y - tip.y;
+            const dz = c.tipPos.z - tip.z;
+            if (dx * dx + dy * dy + dz * dz <= r2) return false;
+        }
+        return true;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Nearby-trunk merge (works even without grid mode)
+// ---------------------------------------------------------------------------
+
+/** When grid is disabled, merge candidates within this XY distance of an existing trunk. */
+const GRIDLESS_MERGE_RADIUS_MM = 4.0;
+
+interface MergeHost {
+    trunkId: string;
+    tipPos: { x: number; y: number; z: number };
+}
+
+// ---------------------------------------------------------------------------
+// Leaf fan-out — max distance / angle constants
+// ---------------------------------------------------------------------------
+
+const LEAF_FAN_RADIUS_MM = 5.0;
+const LEAF_FAN_MAX_ANGLE_DEG = 60;
+
+// ---------------------------------------------------------------------------
+// Leaf cone triangle collision
+// ---------------------------------------------------------------------------
+
+const _leafRaycaster = new THREE.Raycaster();
+
+/** Check whether a leaf cone from `knotPos` to `cone` intersects the model.
+ *  Raycasts from the knot toward a point just before the tip (offset inward
+ *  along the surface normal), excluding the tip contact itself.  Returns true
+ *  if the ray hits a model triangle before reaching the offset point. */
+function leafConeCollides(
+    knotPos: { x: number; y: number; z: number },
+    cone: { pos: { x: number; y: number; z: number }; surfaceNormal?: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } },
+    mesh: THREE.Mesh,
+): boolean {
+    // Ray from knot toward tip. The tip is ON the surface — the first
+    // hit should be the tip surface at ~totalDist.  If the first hit
+    // is significantly closer, there's geometry between shaft and tip.
+    const dx = cone.pos.x - knotPos.x;
+    const dy = cone.pos.y - knotPos.y;
+    const dz = cone.pos.z - knotPos.z;
+    const totalDist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (totalDist < 0.01) return false;
+    const dir = new THREE.Vector3(dx / totalDist, dy / totalDist, dz / totalDist);
+
+    // Cast two offset rays to account for cone thickness (~0.25mm).
+    const n = cone.surfaceNormal ?? cone.normal;
+    const perpX = dir.y * n.z - dir.z * n.y;
+    const perpY = dir.z * n.x - dir.x * n.z;
+    const perpZ = dir.x * n.y - dir.y * n.x;
+    const perpLen = Math.sqrt(perpX * perpX + perpY * perpY + perpZ * perpZ);
+    const offsets = perpLen > 0.001
+        ? [0, 0.25, -0.25]
+        : [0];
+
+    for (const off of offsets) {
+        const sx = knotPos.x + (perpX / perpLen) * off;
+        const sy = knotPos.y + (perpY / perpLen) * off;
+        const sz = knotPos.z + (perpZ / perpLen) * off;
+        _leafRaycaster.set(new THREE.Vector3(sx, sy, sz), dir);
+        const hits = _leafRaycaster.intersectObject(mesh, false);
+        if (hits.length > 0 && hits[0].distance < totalDist - 0.5) return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Post-build collision verification
+// ---------------------------------------------------------------------------
+
+/** Check all segments of a built branch against the SDF. */
+function branchCollidesWithSDF(
+    branch: { segments: Array<{ bottomJoint?: { pos: { x: number; y: number; z: number } } | null; topJoint?: { pos: { x: number; y: number; z: number } } | null; diameter?: number }> },
+    mesh: THREE.Mesh,
+): boolean {
+    for (const seg of branch.segments) {
+        const start = seg.bottomJoint?.pos;
+        const end = seg.topJoint?.pos;
+        if (start && end) {
+            const r = (seg.diameter ?? 1.0) / 2;
+            if (isShaftBlocked(start, end, r, mesh)) return true;
+        }
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Attachment capacity
+// ---------------------------------------------------------------------------
+
+/**
+ * Count how many knots (branches + leaves) are attached to a trunk.
+ * Does NOT count brace knots (they use braceSegment: prefix).
+ */
+function countAttachmentsOnTrunk(trunkId: string): number {
+    const snapshot = getSnapshot();
+    const trunk = snapshot.trunks[trunkId];
+    if (!trunk) return 0;
+
+    const segmentIds = new Set(trunk.segments.map(s => s.id));
+    // Also match legacy knots that reference the trunk ID directly.
+    segmentIds.add(trunkId);
+
+    let count = 0;
+    for (const knot of Object.values(snapshot.knots)) {
+        if (segmentIds.has(knot.parentShaftId)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/** Returns true if the trunk has reached its attachment capacity. */
+function isTrunkAtAttachmentCapacity(trunkId: string, limit: number): boolean {
+    if (limit <= 0) return false;
+    return countAttachmentsOnTrunk(trunkId) >= limit;
+}
+
+// ---------------------------------------------------------------------------
+// Nearby-trunk merge
+// ---------------------------------------------------------------------------
+
+/** Find the closest existing trunk (shaft or tip) within merge radius. */
+function findMergeHost(
+    tipPos: { x: number; y: number; z: number },
+    modelId: string,
+): MergeHost | null {
+    const snapshot = getSnapshot();
+    const r2 = GRIDLESS_MERGE_RADIUS_MM * GRIDLESS_MERGE_RADIUS_MM;
+    let best: MergeHost | null = null;
+    let bestDist2 = Infinity;
+
+    for (const [id, trunk] of Object.entries(snapshot.trunks)) {
+        if (trunk.modelId !== modelId) continue;
+
+        // Check trunk tip (contact cone).
+        const tp = trunk.contactCone?.pos;
+        if (tp) {
+            const dx = tipPos.x - tp.x;
+            const dy = tipPos.y - tp.y;
+            const dz = tipPos.z - tp.z;
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 <= r2 && d2 < bestDist2) {
+                bestDist2 = d2;
+                best = { trunkId: id, tipPos: tp };
+            }
+        }
+
+        // Also check segment joints (shaft body), preferring lower attachment.
+        for (const seg of trunk.segments) {
+            const jp = seg.bottomJoint?.pos ?? seg.topJoint?.pos;
+            if (!jp) continue;
+            const dx = tipPos.x - jp.x;
+            const dy = tipPos.y - jp.y;
+            const dz = tipPos.z - jp.z;
+            const d2 = dx * dx + dy * dy + dz * dz;
+            // Slight preference for shaft body over tip (multiply by 0.9
+            // so a shaft point at the same distance wins).
+            const adjustedD2 = d2 * 0.9;
+            if (adjustedD2 <= r2 && adjustedD2 < bestDist2) {
+                bestDist2 = adjustedD2;
+                best = { trunkId: id, tipPos: jp };
+            }
+        }
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Run a single candidate through the standard placement pipeline:
+ * resolve surface normal → buildTrunkData → decideGridPlacement → commit.
+ *
+ * When grid mode is disabled, we additionally check whether another
+ * trunk already sits within {@link GRIDLESS_MERGE_RADIUS_MM} of this
+ * candidate's tip.  If so, the candidate is routed as a branch off
+ * that host instead of becoming a standalone trunk — preventing
+ * clusters of near-identical vertical supports at the same XY.
+ *
+ * This is the same sequence used by manual placement clicks.
+ * Returns the decision kind so the orchestrator can tally.
+ */
+function placeOneCandidate(
+    candidate: CandidatePoint,
+    _settingsOverride: Partial<AutoSupportSettings> | undefined,
+    modelCtx?: ModelSizingContext,
+    totalArea?: number,
+): { kind: string; rejectedReason?: RejectReason; preset?: 'detail' | 'structure' | 'anchor'; entityId?: string; stickCount?: number } {
+    const supportSettings = getSettings();
+    const snapshot = getSnapshot();
+    const mesh = getModelMesh(candidate.modelId) ?? undefined;
+
+    // Resolve the contact point + normal.
+    // Overhang candidates already carry an on-surface point and the true
+    // down-facing face normal from the sampler. Raycasting would snap to the
+    // up-facing TOP surface and flip the normal upward — which buildTrunkData
+    // rejects as ANGLE_TOO_STEEP — so use the sampler values directly.
+    let tipPos: { x: number; y: number; z: number };
+    let tipNormal: { x: number; y: number; z: number };
+    if (candidate.source === 'overhang') {
+        tipPos = candidate.tipPos;
+        tipNormal = candidate.tipNormal;
+    } else {
+        const resolved = resolveSurfaceNormal(candidate.tipPos, mesh);
+        tipPos = resolved.point;
+        tipNormal = resolved.normal;
+    }
+    // Supports approach from below, so the contact normal must point outward in
+    // the downward hemisphere. If it points upward (into the model — common for
+    // off-surface island contacts whose raycast snapped to the top face), fall
+    // back to straight-down so the trunk can attach.
+    if (tipNormal.z > -0.05) {
+        tipNormal = { x: 0, y: 0, z: -1 };
+    }
+
+    // Determine preset band for analytics.
+    const area = candidate.islandAreaMm2;
+    const preset = area <= 0.15 ? 'detail' as const : area <= 0.50 ? 'structure' as const : 'anchor' as const;
+
+    // ── Gridless merge check ──────────────────────────────────────
+    if (!supportSettings.grid?.enabled) {
+        const host = findMergeHost(tipPos, candidate.modelId);
+        if (host) {
+            // Find the best attachment point on the host trunk's shaft,
+            // below the candidate's tip.  This matches the W-key sprout
+            // behaviour: leaves/branches fan from the shaft body, not
+            // from the contact tip.
+            const hostTrunk = snapshot.trunks[host.trunkId];
+            let bestKnotPos: { x: number; y: number; z: number } | null = null;
+            let bestKnotSegmentId = '';
+
+            // Best attachment: the junction where the shaft meets the
+            // contact cone — the topJoint of the topmost segment.
+            // For straight trunks this is just below the tip; for routed
+            // trunks it's the socket joint before the cone.
+            if (hostTrunk && hostTrunk.segments.length > 0) {
+                const topSeg = hostTrunk.segments[hostTrunk.segments.length - 1];
+                const jp = topSeg.topJoint?.pos;
+                if (jp && jp.z < tipPos.z) {
+                    bestKnotPos = jp;
+                    bestKnotSegmentId = topSeg.id;
+                }
+            }
+            // Fallback: any shaft joint below the tip.
+            if (!bestKnotPos && hostTrunk) {
+                for (const seg of hostTrunk.segments) {
+                    const jp = seg.bottomJoint?.pos ?? seg.topJoint?.pos;
+                    if (jp && jp.z < tipPos.z) {
+                        if (!bestKnotPos || jp.z > bestKnotPos.z) {
+                            bestKnotPos = jp;
+                            bestKnotSegmentId = seg.id;
+                        }
+                    }
+                }
+            }
+            const knotPos = bestKnotPos ?? host.tipPos;
+            let knotDiameter = 1.0;
+            if (hostTrunk && bestKnotSegmentId) {
+                const seg = hostTrunk.segments.find(s => s.id === bestKnotSegmentId);
+                if (seg?.diameter) knotDiameter = seg.diameter;
+            }
+            const parentKnot = {
+                id: `auto-merge-${candidate.id}`,
+                parentShaftId: bestKnotSegmentId || host.trunkId,
+                pos: knotPos,
+                diameter: knotDiameter + 0.1,
+            };
+            // Leaf decision: use tip-to-tip distance (host contact cone →
+            // candidate tip), not shaft-knot distance.  This is the visual
+            // span the leaf would bridge.
+            const hostTip = hostTrunk?.contactCone?.pos ?? knotPos;
+            const tipSpanMm = Math.sqrt(
+                (tipPos.x - hostTip.x) ** 2 +
+                (tipPos.y - hostTip.y) ** 2 +
+                (tipPos.z - hostTip.z) ** 2,
+            );
+            const MAX_AUTO_LEAF_SPAN_MM = 8.0;
+            if (tipSpanMm <= MAX_AUTO_LEAF_SPAN_MM) {
+                // Knot attachment is on the shaft; angle check uses the
+                // actual knot-to-tip geometry for the leaf cone.
+                const hDist = Math.sqrt(
+                    (tipPos.x - knotPos.x) ** 2 + (tipPos.y - knotPos.y) ** 2,
+                );
+                const vDist = tipPos.z - knotPos.z;
+                if (vDist <= 0) {
+                    console.log(LOG_PREFIX,
+                        `Merge skip ${candidate.id}: knot above tip (kZ=${knotPos.z.toFixed(1)} tZ=${tipPos.z.toFixed(1)})`);
+                } else if (vDist < 1.5) {
+                    // Too shallow — fall through to branch.
+                    console.log(LOG_PREFIX,
+                        `Leaf (merge) ${candidate.id}: too shallow (vDist=${vDist.toFixed(1)}mm), trying branch...`);
+                } else {
+                    try {
+                        const { leaf, supportData: sd } = buildLeafData({
+                            tipPos,
+                            surfaceNormal: tipNormal,
+                            modelId: candidate.modelId,
+                            parentKnot,
+                            hostDiameterMm: parentKnot.diameter ?? 1.0,
+                            mesh,
+                        });
+                        if (sd.error) {
+                            console.log(LOG_PREFIX,
+                                `Leaf (merge) ${candidate.id}: sd.error, trying branch...`);
+                        } else if (mesh && leafConeCollides(parentKnot.pos, leaf.contactCone, mesh)) {
+                            console.log(LOG_PREFIX,
+                                `Leaf (merge) ${candidate.id}: triangle collision, trying branch...`);
+                        } else {
+                            const cap = supportSettings.autoSupport?.maxAttachmentsPerTrunk ?? 12;
+                            if (isTrunkAtAttachmentCapacity(host.trunkId, cap)) {
+                                console.log(LOG_PREFIX,
+                                    `Merge skip ${candidate.id}: host ${host.trunkId} at capacity (${cap} attachments)`);
+                                // fall through to standalone trunk
+                            } else {
+                                addKnot(parentKnot);
+                                addLeaf(leaf);
+                                const la = (Math.atan2(hDist, vDist) * 180) / Math.PI;
+                                console.log(LOG_PREFIX,
+                                    `Leaf (merge) ${candidate.id} → host ${host.trunkId} ` +
+                                    `span=${tipSpanMm.toFixed(1)}mm angle=${la.toFixed(0)}° kZ=${knotPos.z.toFixed(1)}`);
+                                return { kind: 'leaf', preset };
+                            }
+                        }
+                    } catch (_) {}
+                }
+            } else if (tipSpanMm > MAX_AUTO_LEAF_SPAN_MM) {
+                // Branch: requires upward angle from knot to tip.
+                const hDist2 = Math.sqrt(
+                    (tipPos.x - knotPos.x) ** 2 + (tipPos.y - knotPos.y) ** 2,
+                );
+                const vDist2 = tipPos.z - knotPos.z;
+                const mergeAngleDeg = (Math.atan2(hDist2, vDist2) * 180) / Math.PI;
+                if (mergeAngleDeg > 50) {
+                    console.log(LOG_PREFIX,
+                        `Merge skip ${candidate.id}: angle too steep (${mergeAngleDeg.toFixed(0)}° > 50°) span=${tipSpanMm.toFixed(1)}mm`);
+                } else try {
+                    const { branch, supportData: sd } = buildBranchData({
+                        tipPos, tipNormal, modelId: candidate.modelId, parentKnot, mesh,
+                    });
+                    const collides = sd.error || (mesh && branchCollidesWithSDF(branch, mesh));
+                    if (collides) {
+                        console.log(LOG_PREFIX, `Branch (merge) ${candidate.id}: collision, falling back`);
+                    } else {
+                        const cap = supportSettings.autoSupport?.maxAttachmentsPerTrunk ?? 12;
+                        if (isTrunkAtAttachmentCapacity(host.trunkId, cap)) {
+                            console.log(LOG_PREFIX,
+                                `Merge skip ${candidate.id}: host ${host.trunkId} at capacity (${cap} attachments)`);
+                            // fall through to standalone trunk
+                        } else {
+                            addKnot(parentKnot);
+                            addBranch(branch);
+                            const ma = (Math.atan2(hDist2, vDist2) * 180) / Math.PI;
+                            console.log(LOG_PREFIX,
+                                `Branch (merge) ${candidate.id} → host ${host.trunkId} ` +
+                                `span=${tipSpanMm.toFixed(1)}mm angle=${ma.toFixed(0)}° kZ=${knotPos.z.toFixed(1)}`);
+                            return { kind: 'branch', preset };
+                        }
+                    }
+                } catch (e) {
+                    console.log(LOG_PREFIX,
+                        `Merge branch failed for ${candidate.id}, falling back to trunk: ` +
+                        `${e instanceof Error ? e.message : String(e)}`);
+                }
+            }
+        }
+    }
+
+    // Dynamic physics-based sizing using model context + user settings.
+    const overrides = sizeParameters(candidate, modelCtx, supportSettings, totalArea);
+
+    const trunkResult = buildTrunkData({
+        tipPos,
+        tipNormal,
+        modelId: candidate.modelId,
+        mesh,
+        overrides,
+        isPreview: false,
+    });
+
+    if (trunkResult.error) {
+        // Cavity fallback: if the trunk can't reach the build plate, try
+        // bridging to a lower surface with a Stick (model-to-model).
+        if (trunkResult.error === 'COLLISION_WITH_MODEL' && mesh) {
+            const cavityResult = buildCavityStick(tipPos, tipNormal, candidate.modelId, mesh);
+            if (cavityResult) {
+                if (cavityResult.kind === 'stick') {
+                    addStick(cavityResult.stick);
+                    console.log(LOG_PREFIX,
+                        `Stick (cavity) ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
+                    return { kind: 'stick', preset };
+                } else {
+                    addTwig(cavityResult.twig);
+                    console.log(LOG_PREFIX,
+                        `Twig (cavity) ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
+                    return { kind: 'twig', preset };
+                }
+            }
+            // Angled-escape trunk: tilt the shaft outward to clear the model and
+            // reach the plate where a vertical/A*-routed trunk could not.
+            const escape = buildEscapeTrunkData({
+                tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides, isPreview: false,
+            });
+            if (!escape.error) {
+                addRoot(escape.root);
+                addTrunk(escape.trunk);
+                console.log(LOG_PREFIX,
+                    `Escape trunk (tilted) ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
+                return { kind: 'trunk', preset, entityId: escape.trunk.id };
+            }
+        }
+        console.log(LOG_PREFIX,
+            `Rejected ${candidate.id} (${candidate.source}): trunk build error "${trunkResult.error}" ` +
+            `tip=(${tipPos.x.toFixed(1)},${tipPos.y.toFixed(1)},${tipPos.z.toFixed(1)}) ` +
+            `normal=(${tipNormal.x.toFixed(2)},${tipNormal.y.toFixed(2)},${tipNormal.z.toFixed(2)})`);
+        return { kind: 'reject', rejectedReason: 'trunk_build_error', preset };
+    }
+
+    // Route through the standard grid placement engine.
+    // This handles grid snapping, SDF collision checks, host-trunk
+    // attachment (branch/leaf), anchor short-circuit, and rejection.
+    const decision = decideGridPlacement({
+        settings: supportSettings,
+        snapshot,
+        candidate: trunkResult,
+        tipPos,
+        tipNormal,
+        modelId: candidate.modelId,
+        mesh,
+    });
+
+    switch (decision.kind) {
+        case 'place_trunk': {
+            const trunkId = decision.trunkBuild.trunk.id;
+            addRoot(decision.trunkBuild.root);
+            addTrunk(decision.trunkBuild.trunk);
+            console.log(LOG_PREFIX,
+                `Trunk ${candidate.id} (→ ${trunkId}) @ grid ${decision.nodeKey} ` +
+                `area=${candidate.islandAreaMm2.toFixed(2)}mm² Z=${candidate.zHeight.toFixed(1)}mm ${preset}`);
+            return { kind: 'trunk', preset, entityId: trunkId };
+        }
+
+        case 'place_anchor':
+            addAnchor(decision.anchor);
+            console.log(LOG_PREFIX, `Anchor ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
+            return { kind: 'anchor', preset };
+
+        case 'place_branch': {
+            const cap = supportSettings.autoSupport?.maxAttachmentsPerTrunk ?? 12;
+            if (isTrunkAtAttachmentCapacity(decision.hostTrunkId, cap)) {
+                console.log(LOG_PREFIX,
+                    `Grid skip ${candidate.id}: host ${decision.hostTrunkId} at capacity (${cap})`);
+                return { kind: 'reject', rejectedReason: 'grid_reject_other', preset };
+            }
+            addKnot(decision.knot);
+            addBranch(decision.branch);
+            console.log(LOG_PREFIX,
+                `Branch ${candidate.id} → host ${decision.hostTrunkId} ` +
+                `grid ${decision.nodeKey}`);
+            return { kind: 'branch', preset };
+        }
+
+        case 'place_leaf': {
+            const cap = supportSettings.autoSupport?.maxAttachmentsPerTrunk ?? 12;
+            if (isTrunkAtAttachmentCapacity(decision.hostTrunkId, cap)) {
+                console.log(LOG_PREFIX,
+                    `Grid skip ${candidate.id}: host ${decision.hostTrunkId} at capacity (${cap})`);
+                return { kind: 'reject', rejectedReason: 'grid_reject_other', preset };
+            }
+            addKnot(decision.knot);
+            addLeaf(decision.leaf);
+            console.log(LOG_PREFIX,
+                `Leaf ${candidate.id} → host ${decision.hostTrunkId} ` +
+                `grid ${decision.nodeKey}`);
+            return { kind: 'leaf', preset };
+        }
+
+        case 'replace_trunk':
+            // The old trunk gets removed by the caller (or we accept overwrite).
+            // For now: add the new trunk and root.  The old trunk's root is
+            // implicitly replaced because we overwrite the grid node.
+            addRoot(decision.trunkBuild.root);
+            addTrunk(decision.trunkBuild.trunk);
+            console.log(LOG_PREFIX,
+                `Replace trunk @ ${decision.nodeKey}: ` +
+                `${candidate.id} (Z=${candidate.zHeight.toFixed(1)}) → host ${decision.hostTrunkId}`);
+            return { kind: 'trunk', preset, entityId: decision.trunkBuild.trunk.id };
+
+        case 'reject': {
+            const reason: RejectReason =
+                decision.reason === 'COLLISION_WITH_MODEL' ? 'grid_reject_collision' :
+                decision.reason === 'NO_VALID_ATTACHMENT' || decision.reason === 'KNOT_ABOVE_TIP' ? 'grid_reject_no_attachment' :
+                'grid_reject_other';
+            console.log(LOG_PREFIX, `Rejected ${candidate.id}: ${decision.reason} (grid ${decision.nodeKey})`);
+            return { kind: 'reject', rejectedReason: reason, preset };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// runAutoPlace
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the complete auto-support pipeline using the standard placement engine.
+ *
+ * Each candidate is individually routed through
+ * {@link decideGridPlacement}, the same function used by manual support
+ * placement.  This guarantees that SDF collision checks, grid snapping,
+ * host-trunk attachment rules, and anchor/branch/leaf auto-selection are
+ * identical to the manual workflow.
+ *
+ * Candidates are processed in priority order (largest / lowest islands
+ * first).  Because the state snapshot is refreshed after every commit,
+ * later candidates see the supports placed by earlier ones, enabling
+ * organic tree fan-out via grid occupancy — a subsequent candidate whose
+ * preferred grid node is already occupied will automatically become a
+ * branch or leaf of the existing trunk.
+ */
+/** Actual solid volume of a mesh in world mm³ (signed-tetrahedron sum × scale³). */
+function computeMeshVolumeMm3(mesh: THREE.Mesh): number {
+    const geom = mesh.geometry;
+    const pos = geom.getAttribute('position');
+    if (!pos) return 0;
+    const index = geom.index;
+    let sixV = 0;
+    const tet = (ia: number, ib: number, ic: number) => {
+        const x1 = pos.getX(ia), y1 = pos.getY(ia), z1 = pos.getZ(ia);
+        const x2 = pos.getX(ib), y2 = pos.getY(ib), z2 = pos.getZ(ib);
+        const x3 = pos.getX(ic), y3 = pos.getY(ic), z3 = pos.getZ(ic);
+        sixV += x1 * (y2 * z3 - z2 * y3) - y1 * (x2 * z3 - z2 * x3) + z1 * (x2 * y3 - y2 * x3);
+    };
+    if (index) {
+        for (let i = 0; i < index.count; i += 3) tet(index.getX(i), index.getX(i + 1), index.getX(i + 2));
+    } else {
+        for (let i = 0; i < pos.count; i += 3) tet(i, i + 1, i + 2);
+    }
+    const localVol = Math.abs(sixV) / 6;
+    const s = new THREE.Vector3();
+    mesh.matrixWorld.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+    return localVol * Math.abs(s.x * s.y * s.z);
+}
+
+export function runAutoPlace(
+    islands: DetectedIsland[],
+    modelId: string,
+    settingsOverride?: Partial<AutoSupportSettings>,
+): AutoPlaceResult {
+    // ------------------------------------------------------------------
+    // 0. Settings
+    // ------------------------------------------------------------------
+
+    const autoSettings = normalizeAutoSupportSettings(settingsOverride ?? undefined);
+
+    if (!autoSettings.enabled) {
+        return makeResult(0, 0, 0, 0, 0, 0, false, 'Auto-support is disabled.');
+    }
+
+    const beforeSnapshot = getSnapshot();
+
+    // ------------------------------------------------------------------
+    // 1. Generate candidates
+    // ------------------------------------------------------------------
+
+    console.log(LOG_PREFIX, `Input: ${islands.length} islands from scan`);
+
+    let candidates = generateCandidates(islands, autoSettings);
+    candidates = candidates.map((c): CandidatePoint => ({ ...c, modelId }));
+
+    // Overhang surface sampling — broad down-facing faces the island detector
+    // misses (islands only flag failures, not layer-supported overhangs that
+    // still need holding). These candidates are already on the mesh surface.
+    const meshForOverhang = getModelMesh(modelId) ?? undefined;
+    if (autoSettings.overhangSamplingEnabled && meshForOverhang) {
+        const overhang = generateOverhangCandidates(meshForOverhang, autoSettings, modelId);
+        console.log(LOG_PREFIX, `Overhang sampling: +${overhang.length} candidates ` +
+            `(angle<${autoSettings.overhangAngleThresholdDeg}°, spacing ${autoSettings.overhangSpacingMm}mm)`);
+        candidates = candidates.concat(overhang);
+    }
+
+    console.log(LOG_PREFIX,
+        `Step 1/3: ${candidates.length} candidates generated ` +
+        `(filtered from ${islands.length} islands, min area ${autoSettings.minIslandAreaMm2}mm²)`);
+
+    if (candidates.length === 0) {
+        return makeResult(0, 0, 0, 0, 0, 0, false, 'No viable support candidates found.');
+    }
+
+    // ------------------------------------------------------------------
+    // 2. Deduplicate
+    // ------------------------------------------------------------------
+
+    const beforeDedup = candidates.length;
+    candidates = deduplicateCandidates(candidates, autoSettings);
+
+    console.log(LOG_PREFIX,
+        `Step 2/3: ${candidates.length} candidates after dedup ` +
+        `(removed ${beforeDedup - candidates.length} within ${autoSettings.tipInfluenceRadiusMm}mm radius)`);
+
+    if (candidates.length === 0) {
+        return makeResult(0, 0, 0, 0, 0, 0, false, 'All candidates deduplicated — nothing to place.');
+    }
+
+    // ------------------------------------------------------------------
+    // 2b. Filter out already-supported positions
+    // ------------------------------------------------------------------
+
+    // Guarantee the model's lowest point(s) get supported — the critical print
+    // anchors. Triangle-centroid overhang sampling never lands on the down-pointing
+    // vertex, so add explicit anchor candidates and process them FIRST (prepend),
+    // before neighbours occupy the grid. Without this the lowest point can be left
+    // unsupported, making the part impossible to print.
+    const anchorMesh = getModelMesh(modelId);
+    if (anchorMesh) {
+        const anchors = generateLowestPointCandidates(anchorMesh, modelId, 5, 2)
+            .map((c): CandidatePoint => ({ ...c, modelId }));
+        if (anchors.length > 0) {
+            candidates = [...anchors, ...candidates];
+            console.log(LOG_PREFIX, `Lowest-point anchors: +${anchors.length} (critical print anchors)`);
+        }
+    }
+
+    const beforeSupportFilter = candidates.length;
+    candidates = filterAlreadySupported(candidates);
+    console.log(LOG_PREFIX,
+        `Step 2b: ${candidates.length} candidates after support filter ` +
+        `(removed ${beforeSupportFilter - candidates.length} already supported within ${ALREADY_SUPPORTED_RADIUS_MM}mm)`);
+
+    if (candidates.length === 0) {
+        return makeResult(0, 0, 0, 0, 0, 0, false,
+            'All candidate positions already have supports.');
+    }
+
+    // ------------------------------------------------------------------
+    // 3. Place candidates through the standard pipeline
+    // ------------------------------------------------------------------
+    // Each candidate goes through resolveNormal → buildTrunkData →
+    // decideGridPlacement.  State is committed after each placement so
+    // subsequent candidates see existing supports (enabling organic
+    // tree fan-out via grid occupancy).
+
+    const mesh: THREE.Mesh | undefined = getModelMesh(modelId) ?? undefined;
+    if (mesh) mesh.updateMatrixWorld();
+    console.log(LOG_PREFIX,
+        `Mesh for ${modelId}: ${mesh ? 'available (pathfinding + SDF active)' : 'UNAVAILABLE (supports route straight, no collision avoidance)'}`);
+
+
+
+    const gridEnabled = getSettings().grid?.enabled;
+    console.log(LOG_PREFIX,
+        `Grid mode: ${gridEnabled ? 'ENABLED (supports share grid nodes, branch/leaf fan-out active)' : 'DISABLED (all supports become standalone trunks)'}`);
+
+    // ── Model sizing context ────────────────────────────────────────
+    // Pre-sort candidates by Z for weight distribution counting.
+    const sortedByZ = [...candidates].sort((a, b) => a.zHeight - b.zHeight);
+    const belowCount = new Map<string, number>();
+    for (let i = 0; i < sortedByZ.length; i++) {
+        belowCount.set(sortedByZ[i].id, i + 1);
+    }
+
+    let modelCtx: ModelSizingContext | undefined;
+    if (mesh) {
+        modelCtx = {
+            // ACTUAL mesh volume, not the bounding-box volume. For a tilted model
+            // the bbox can be several times the real volume, which over-estimates
+            // weight and inflates every support's shaft diameter (→ fat trunks
+            // whose contact cones then penetrate the model). Volume is rotation-
+            // invariant, so this also makes sizing independent of orientation.
+            modelVolumeMm3: computeMeshVolumeMm3(mesh),
+            totalCandidates: candidates.length,
+            candidatesBelowZ: 0, // placeholder — filled per-candidate below
+        };
+    }
+
+    let placedTrunks = 0;
+    let placedAnchors = 0;
+    let placedBranches = 0;
+    let placedLeaves = 0;
+    let placedSticks = 0;
+    let rejectedCount = 0;
+
+    // Analytics accumulators
+    const presets = { detail: 0, structure: 0, anchor: 0 };
+    const rejectionReasons: Record<string, number> = {};
+
+    // Each support is sized for its OWN contact area only. Previously we summed
+    // the areas of every candidate within GRIDLESS_MERGE_RADIUS_MM ("cluster
+    // total") and sized every trunk for that — but the code passed it to ALL
+    // trunks, including standalone ones (contradicting the documented intent),
+    // and the cluster included candidates that end up REJECTED and are never
+    // actually supported. In dense regions that inflated the load ~6×, saturating
+    // the diameter to the 2mm cap → fat trunks that both reject (can't seed under
+    // the model) and let their contact cone penetrate. Sizing on own area lets a
+    // trunk that genuinely hosts branches/leaves be re-sized later if needed.
+
+    for (const candidate of candidates) {
+        try {
+            const ctx: ModelSizingContext | undefined = modelCtx
+                ? { ...modelCtx, candidatesBelowZ: belowCount.get(candidate.id) ?? candidates.length }
+                : undefined;
+            const result = placeOneCandidate(candidate, settingsOverride, ctx, candidate.islandAreaMm2);
+            switch (result.kind) {
+                case 'trunk':   placedTrunks++; break;
+                case 'anchor':  placedAnchors++; break;
+                case 'branch':  placedBranches++; break;
+                case 'leaf':    placedLeaves++; break;
+                case 'stick':   placedSticks++; break;
+                case 'reject':
+                    rejectedCount++;
+                    if (result.rejectedReason) {
+                        rejectionReasons[result.rejectedReason] = (rejectionReasons[result.rejectedReason] ?? 0) + 1;
+                    }
+                    break;
+            }
+            if (result.preset) presets[result.preset]++;
+        } catch (e) {
+            rejectedCount++;
+            rejectionReasons['exception'] = (rejectionReasons['exception'] ?? 0) + 1;
+            console.warn(LOG_PREFIX,
+                `Exception placing ${candidate.id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+    }
+
+    const changed =
+        placedTrunks > 0 ||
+        placedAnchors > 0 ||
+        placedBranches > 0 ||
+        placedLeaves > 0 ||
+        placedSticks > 0;
+
+    console.log(LOG_PREFIX,
+        `Step 3/3: ${placedTrunks}T ${placedAnchors}A ${placedBranches}B ${placedLeaves}L ${placedSticks}S — ${rejectedCount} rejected ` +
+        `| presets: detail=${presets.detail} structure=${presets.structure} anchor=${presets.anchor}`);
+
+    // ── Coverage analytics ────────────────────────────────────────
+    const snapshot = getSnapshot();
+    const supportedIds = new Set<string>();
+    const SUPPORT_COVERAGE_RADIUS_MM = 4.0;
+    const covR2 = SUPPORT_COVERAGE_RADIUS_MM * SUPPORT_COVERAGE_RADIUS_MM;
+
+    // Collect all support tips from the post-placement snapshot.
+    const allTips: Array<{ x: number; y: number; z: number }> = [];
+    for (const t of Object.values(snapshot.trunks)) {
+        if (t.contactCone?.pos) allTips.push(t.contactCone.pos);
+    }
+    for (const b of Object.values(snapshot.branches)) {
+        if (b.contactCone?.pos) allTips.push(b.contactCone.pos);
+    }
+    for (const l of Object.values(snapshot.leaves)) {
+        if (l.contactCone?.pos) allTips.push(l.contactCone.pos);
+    }
+    for (const a of Object.values(snapshot.anchors)) {
+        if (a.contactCone?.pos) allTips.push(a.contactCone.pos);
+    }
+
+    let coveredArea = 0;
+    let totalArea = 0;
+    for (const island of islands) {
+        const area = island.areaMm2 ?? 0;
+        totalArea += area;
+        const cx = island.contact.x;
+        const cy = island.contact.y;
+        const cz = island.contact.z;
+        let covered = false;
+        for (const tip of allTips) {
+            const dx = cx - tip.x;
+            const dy = cy - tip.y;
+            const dz = cz - tip.z;
+            if (dx * dx + dy * dy + dz * dz <= covR2) {
+                covered = true;
+                break;
+            }
+        }
+        if (covered) {
+            supportedIds.add(island.id);
+            coveredArea += area;
+        }
+    }
+
+    // ── Sizing debug info ───────────────────────────────────────────
+    let sizingDebug: AutoPlaceAnalytics['sizingDebug'];
+    if (modelCtx && candidates.length > 0) {
+        const weightG = modelCtx.modelVolumeMm3 * 0.0011;
+        const areas = candidates.map(c => c.islandAreaMm2);
+        areas.sort((a, b) => a - b);
+        const minArea = areas[0];
+        const maxArea = areas[areas.length - 1];
+        const avgArea = areas.reduce((s, a) => s + a, 0) / areas.length;
+        const zMax = Math.max(...candidates.map(c => c.zHeight), 1);
+        // Sample min/max/avg candidates for shaft diameter range.
+        const makeSample = (area: number, z: number): CandidatePoint => ({
+            id: 'dbg', tipPos: { x: 0, y: 0, z: 0 }, tipNormal: { x: 0, y: 0, z: -1 },
+            modelId: '', source: 'voxel', islandAreaMm2: area,
+            zHeight: z, overhangAngleDeg: 45, priority: 0,
+        });
+        const sMin = sizeParameters(makeSample(minArea, 10), modelCtx, getSettings());
+        const sMax = sizeParameters(makeSample(maxArea, zMax), modelCtx, getSettings());
+        const sAvg = sizeParameters(makeSample(avgArea, zMax / 2), modelCtx, getSettings());
+        sizingDebug = {
+            modelVolumeMm3: Math.round(modelCtx.modelVolumeMm3),
+            estimatedWeightG: round2(weightG),
+            totalCandidates: modelCtx.totalCandidates,
+            weightPerSupportG: round2(weightG * (zMax / 2) / zMax), // mid-height support
+            avgIslandAreaMm2: round2(avgArea),
+            avgPeelForceN: round2(maxArea * 0.2), // worst-case peel force
+            shaftDiameterRange: {
+                min: round2(sMin.shaftDiameterMm ?? 0),
+                max: round2(sMax.shaftDiameterMm ?? 0),
+                avg: round2(sAvg.shaftDiameterMm ?? 0),
+            },
+            tipContactRange: {
+                min: round2(sMin.tipContactDiameterMm ?? 0),
+                max: round2(sMax.tipContactDiameterMm ?? 0),
+                avg: round2(sAvg.tipContactDiameterMm ?? 0),
+            },
+        };
+    }
+
+    const analytics: AutoPlaceAnalytics = {
+        islandsCovered: supportedIds.size,
+        islandsUncovered: islands.length - supportedIds.size,
+        presets,
+        rejectionReasons,
+        areaCoverage: totalArea > 0 ? coveredArea / totalArea : 0,
+        sizingDebug,
+    };
+
+    console.log(LOG_PREFIX,
+        `Coverage: ${analytics.islandsCovered}/${islands.length} islands (${(analytics.areaCoverage * 100).toFixed(0)}% of area). ` +
+        `${analytics.islandsUncovered} islands uncovered.`);
+
+    // ── Post-placement leaf fanning (iterative convergence) ──────────
+    const MAX_FANNING_PASSES = 5;
+    const SHAFT_SAMPLES_PER_SEGMENT = 5;
+
+    console.log(LOG_PREFIX,
+        `Leaf fanning: ${analytics.islandsUncovered} uncovered islands, ${placedTrunks} trunks available. ` +
+        `Max ${MAX_FANNING_PASSES} passes, fan radius ${LEAF_FAN_RADIUS_MM}mm, max angle ${LEAF_FAN_MAX_ANGLE_DEG}°.`);
+
+    for (let pass = 0; pass < MAX_FANNING_PASSES && analytics.islandsUncovered > 0; pass++) {
+        const snap = getSnapshot();
+
+        // Collect trunk shaft sample points from the current snapshot.
+        const shaftPoints: Array<{
+            trunkId: string; pos: { x: number; y: number; z: number }; diameter: number;
+        }> = [];
+        for (const [tid, trunk] of Object.entries(snap.trunks)) {
+            for (const seg of trunk.segments) {
+                const start = seg.bottomJoint?.pos
+                    ?? { x: 0, y: 0, z: 1.5 };
+                const end = seg.topJoint?.pos;
+                if (!end) continue;
+                const diameter = seg.diameter ?? 1.0;
+                for (let i = 0; i <= SHAFT_SAMPLES_PER_SEGMENT; i++) {
+                    const t = i / SHAFT_SAMPLES_PER_SEGMENT;
+                    shaftPoints.push({
+                        trunkId: tid,
+                        pos: {
+                            x: start.x + (end.x - start.x) * t,
+                            y: start.y + (end.y - start.y) * t,
+                            z: start.z + (end.z - start.z) * t,
+                        },
+                        diameter,
+                    });
+                }
+            }
+        }
+
+        if (shaftPoints.length === 0) {
+            console.log(LOG_PREFIX, `Leaf fanning pass ${pass}: no shaft points — breaking.`);
+            break;
+        }
+
+        const fanR2 = LEAF_FAN_RADIUS_MM * LEAF_FAN_RADIUS_MM;
+        const maxAngleRad = (LEAF_FAN_MAX_ANGLE_DEG * Math.PI) / 180;
+        let fannedCount = 0;
+
+        let skippedDist = 0;
+        let skippedAngle = 0;
+        let skippedSameZ = 0;
+
+        for (const island of islands) {
+            if (supportedIds.has(island.id)) continue;
+            const cx = island.contact.x;
+            const cy = island.contact.y;
+            const cz = island.contact.z;
+
+            let bestDist2 = Infinity;
+            let bestSP: typeof shaftPoints[0] | null = null;
+            for (const sp of shaftPoints) {
+                const dx = cx - sp.pos.x;
+                const dy = cy - sp.pos.y;
+                const dz = cz - sp.pos.z;
+                const d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 < bestDist2) { bestDist2 = d2; bestSP = sp; }
+            }
+
+            if (!bestSP || bestDist2 > fanR2) {
+                if (bestSP) skippedDist++;
+                continue;
+            }
+
+            const sp = bestSP;
+            const hDist = Math.sqrt((cx - sp.pos.x) ** 2 + (cy - sp.pos.y) ** 2);
+            const vDist = cz - sp.pos.z;
+            const absVDist = Math.abs(vDist);
+            if (absVDist < 0.01) { skippedSameZ++; continue; }
+            const angleFromVertical = Math.atan2(hDist, absVDist);
+            if (angleFromVertical > maxAngleRad) { skippedAngle++; continue; }
+
+            const parentKnot = {
+                id: `auto-fan-${island.id}-p${pass}`,
+                parentShaftId: sp.trunkId,
+                pos: sp.pos,
+                diameter: sp.diameter + 0.1,
+            };
+
+            // SDF collision check: the straight path from knot to tip
+            // must be clear of the model.
+            const leafMesh = getModelMesh(modelId);
+            if (leafMesh) {
+                const shaftRadius = 0.2; // leaf cone is thin
+                if (isShaftBlocked(sp.pos, { x: cx, y: cy, z: cz }, shaftRadius, leafMesh)) {
+                    continue;
+                }
+            }
+
+            try {
+                const resolved = resolveSurfaceNormal({ x: cx, y: cy, z: cz }, leafMesh ?? undefined);
+                const { leaf, supportData: sd } = buildLeafData({
+                    tipPos: resolved.point,
+                    surfaceNormal: resolved.normal,
+                    modelId,
+                    parentKnot,
+                    hostDiameterMm: sp.diameter,
+                    mesh: leafMesh ?? undefined,
+                });
+                if (sd.error) continue;
+                const fanCap = autoSettings.maxAttachmentsPerTrunk;
+                if (isTrunkAtAttachmentCapacity(sp.trunkId, fanCap)) {
+                    // Trunk full — skip this island for this pass.
+                    continue;
+                }
+                addKnot(parentKnot);
+                addLeaf(leaf);
+                fannedCount++;
+                supportedIds.add(island.id);
+                coveredArea += (island.areaMm2 ?? 0);
+                console.log(LOG_PREFIX,
+                    `Leaf (fan p${pass}) ${island.id} → trunk ${sp.trunkId} ` +
+                    `dist=${Math.sqrt(bestDist2).toFixed(1)}mm angle=${(angleFromVertical * 180 / Math.PI).toFixed(0)}°`);
+            } catch (e) {
+                // Leaf build failed — island stays uncovered.
+            }
+        }
+
+        if (fannedCount > 0) {
+            placedLeaves += fannedCount;
+            analytics.islandsCovered += fannedCount;
+            analytics.islandsUncovered -= fannedCount;
+            analytics.areaCoverage = totalArea > 0 ? coveredArea / totalArea : 0;
+            console.log(LOG_PREFIX,
+                `Leaf fanning pass ${pass}: ${fannedCount} leaves, ` +
+                `${analytics.islandsUncovered} islands still uncovered.`);
+        } else {
+            console.log(LOG_PREFIX,
+                `Leaf fanning pass ${pass}: 0 leaves — ` +
+                `${skippedDist} too far (>${LEAF_FAN_RADIUS_MM}mm), ` +
+                `${skippedAngle} angle too steep (>${LEAF_FAN_MAX_ANGLE_DEG}°), ` +
+                `${skippedSameZ} same Z (can't attach).`);
+            break;
+        }
+    }
+
+    // ── Overhang surface coverage ──────────────────────────────────
+    // Large flat overhangs need more than one support to distribute
+    // peel forces evenly.  Use the island's contactVoxels footprint
+    // to place additional supports across the surface.
+    const OVERHANG_AREA_THRESHOLD_MM2 = 1.5;
+    const OVERHANG_GRID_SPACING_MM = 2.5;
+
+    const islandById = new Map(islands.map(i => [i.id, i]));
+    let overhangSupportsPlaced = 0;
+
+    for (const [tid, trunk] of Object.entries(snapshot.trunks)) {
+        // Find which island this trunk was placed for by matching tip
+        // proximity to island contact positions.
+        const tip = trunk.contactCone?.pos;
+        if (!tip) continue;
+        let bestIsland: DetectedIsland | null = null;
+        let bestDist2 = Infinity;
+        for (const island of islands) {
+            const dx = tip.x - island.contact.x;
+            const dy = tip.y - island.contact.y;
+            const dz = tip.z - island.contact.z;
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < bestDist2) { bestDist2 = d2; bestIsland = island; }
+        }
+        if (!bestIsland) continue;
+
+        const area = bestIsland.areaMm2 ?? 0;
+        const voxels = bestIsland.contactVoxels;
+        if (area < OVERHANG_AREA_THRESHOLD_MM2 || !voxels || voxels.length < 3) continue;
+
+        // Compute bounding box of contact voxels.
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const v of voxels) {
+            if (v.x < minX) minX = v.x;
+            if (v.y < minY) minY = v.y;
+            if (v.x > maxX) maxX = v.x;
+            if (v.y > maxY) maxY = v.y;
+        }
+        const width = maxX - minX;
+        const height = maxY - minY;
+        if (width < OVERHANG_GRID_SPACING_MM && height < OVERHANG_GRID_SPACING_MM) continue;
+
+        // Place a grid of support points across the footprint.
+        const cols = Math.max(2, Math.round(width / OVERHANG_GRID_SPACING_MM));
+        const rows = Math.max(2, Math.round(height / OVERHANG_GRID_SPACING_MM));
+
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const gx = minX + (width * (c + 0.5)) / cols;
+                const gy = minY + (height * (r + 0.5)) / rows;
+
+                // Check if this grid point is within the voxel footprint
+                // (simple containment: near any contact voxel).
+                let inFootprint = false;
+                for (const v of voxels) {
+                    const dx = gx - v.x;
+                    const dy = gy - v.y;
+                    if (dx * dx + dy * dy <= OVERHANG_GRID_SPACING_MM * OVERHANG_GRID_SPACING_MM) {
+                        inFootprint = true;
+                        break;
+                    }
+                }
+                if (!inFootprint) continue;
+
+                // Skip the centroid (already covered by the trunk tip).
+                const cDist = (gx - bestIsland.contact.x) ** 2 + (gy - bestIsland.contact.y) ** 2;
+                if (cDist < 1.0) continue;
+
+                // Place as a branch from the existing trunk.
+                try {
+                    const overhangTip = { x: gx, y: gy, z: bestIsland.contact.z };
+                    const resolved = resolveSurfaceNormal(overhangTip, mesh);
+                    const knotPos = trunk.segments[trunk.segments.length - 1]?.topJoint?.pos ?? tip;
+                    const parentKnot = {
+                        id: `auto-overhang-${bestIsland.id}-${r}-${c}`,
+                        parentShaftId: tid,
+                        pos: knotPos,
+                        diameter: (trunk.segments[trunk.segments.length - 1]?.diameter ?? 1.0) + 0.1,
+                    };
+                    const bm: THREE.Mesh | undefined = mesh ?? undefined;
+                    const { branch, supportData: sd } = buildBranchData({
+                        tipPos: resolved.point,
+                        tipNormal: resolved.normal,
+                        modelId,
+                        parentKnot,
+                        mesh: bm,
+                    });
+                    if (!sd.error) {
+                        const ohCap = autoSettings.maxAttachmentsPerTrunk;
+                        if (isTrunkAtAttachmentCapacity(tid, ohCap)) {
+                            continue;
+                        }
+                        addKnot(parentKnot);
+                        addBranch(branch);
+                        overhangSupportsPlaced++;
+                    }
+                } catch (_) {
+                    // Skip this grid point.
+                }
+            }
+        }
+
+        if (overhangSupportsPlaced > 0) {
+            console.log(LOG_PREFIX,
+                `Overhang coverage: ${overhangSupportsPlaced} additional branches placed for flat surfaces.`);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 4. Auto-bracing + history
+    // ------------------------------------------------------------------
+
+    if (changed) {
+        if (!autoSettings.debugSkipAutoBracing) {
+            console.log(LOG_PREFIX, 'Running auto-brace...');
+            try {
+                const braceResult = runAutoBracing();
+                console.log(LOG_PREFIX, `Auto-brace: ${braceResult.message}`);
+            } catch (e) {
+                console.warn(LOG_PREFIX,
+                    `Auto-brace failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+            }
+        } else {
+            console.log(LOG_PREFIX, 'Auto-brace skipped (debug setting).');
+        }
+
+        try {
+            const afterSnapshot = getSnapshot();
+            pushHistory({
+                type: SUPPORT_AUTO_PLACE,
+                payload: { before: beforeSnapshot, after: afterSnapshot },
+            });
+            console.log(LOG_PREFIX, 'History entry pushed — undo available.');
+        } catch (e) {
+            console.warn(LOG_PREFIX,
+                `History push failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+    }
+
+    return {
+        ...makeResult(
+            placedTrunks,
+            placedAnchors,
+            placedBranches,
+            placedLeaves,
+            placedSticks,
+            rejectedCount,
+            changed,
+            `Placed ${placedTrunks} trunks, ${placedAnchors} anchors, ${placedBranches} branches, ${placedLeaves} leaves, ${placedSticks} sticks. ` +
+            `${rejectedCount} rejected. Coverage: ${analytics.islandsCovered}/${islands.length} islands (${(analytics.areaCoverage * 100).toFixed(0)}%).`,
+        ),
+        analytics,
+    };
+}

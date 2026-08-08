@@ -6,6 +6,7 @@
  */
 
 import * as THREE from 'three';
+import { v4 as uuidv4 } from 'uuid';
 import { Vec3, Roots, Trunk, Segment, Joint } from '../../types';
 import type { ContactCone, SupportTipProfile } from '../../SupportPrimitives/ContactCone/types';
 import { getFinalSocketPosition, getSocketPosition } from '../../SupportPrimitives/ContactCone/contactConeUtils';
@@ -16,19 +17,13 @@ import { getSettings } from '../../Settings';
 import type { SupportData } from '../../rendering/SupportBuilder';
 import { calculateStandardPlacement, type TrunkPlacementResult } from '../../PlacementLogic/StandardPlacement';
 import { calculateSmartPlacementV2 } from '../../PlacementLogic/Pathfinding';
+import { isShaftBlocked } from '../../PlacementLogic/CollisionAvoidance';
 import type { LimitationCode, WarningCode } from '../../types';
 import type { SnappedTrunkRouteResult, TrunkRouteResult } from './trunkRouteTypes';
 import { gridSnappedXYFromKey } from '../../PlacementLogic/Grid/gridMath';
 import { normalizeFirstConstructionJoint, withCentralStraightSupportJoint } from './trunkConstructionJoints';
 import { encodeSupportSettingsHex } from '../../Settings/supportSettingsCodec';
 import { perfMark, perfMeasureWithSpike } from '../../PlacementLogic/Pathfinding/pathfindingPerf';
-
-function uuidv4() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-        const r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    });
-}
 
 const JOINT_CHAIN_Z_EPSILON = 0.0001;
 
@@ -167,9 +162,12 @@ export interface TrunkBuildResult {
 const PLACEMENT_CACHE_QUANT = 0.1; // mm - keep hover cache tight near collision/cavity boundaries
 const NORMAL_CACHE_QUANT = 0.02;   // ~1.1 degree buckets
 const MAX_PLACEMENT_CACHE_ENTRIES = 24;
+export const PLACEMENT_ERROR_CACHE_TTL_MS = 300;
 
-// Map<modelId, Map<cacheKey, result>> — insertion-ordered for FIFO eviction
-type ModelPlacementCache = Map<string, TrunkPlacementResult>;
+type PlacementCacheEntry = { result: TrunkPlacementResult; cachedAt: number };
+
+// Map<modelId, Map<cacheKey, entry>> — insertion-ordered for FIFO eviction
+type ModelPlacementCache = Map<string, PlacementCacheEntry>;
 const placementCacheByModel = new Map<string, ModelPlacementCache>();
 
 function placementCacheKey(tipPos: Vec3, tipNormal: Vec3): string {
@@ -178,8 +176,25 @@ function placementCacheKey(tipPos: Vec3, tipNormal: Vec3): string {
     return `${Math.round(tipPos.x / Q)},${Math.round(tipPos.y / Q)},${Math.round(tipPos.z / Q)},${Math.round(tipNormal.x / NQ)},${Math.round(tipNormal.y / NQ)},${Math.round(tipNormal.z / NQ)}`;
 }
 
+/** Error verdicts can be transient (a stagnated march, a cone-gate near-miss,
+ *  shared caches warmed by earlier probes). Serving them past a short TTL pins
+ *  a stale "blocked" hover on the bucket even after conditions clear, while
+ *  click-time — which bypasses this cache — succeeds. Successful placements
+ *  stay reusable until evicted. */
+export function isCachedPlacementReusable(entry: PlacementCacheEntry, nowMs: number): boolean {
+    if (!entry.result.error) return true;
+    return nowMs - entry.cachedAt <= PLACEMENT_ERROR_CACHE_TTL_MS;
+}
+
 function getPlacementCache(modelId: string, key: string): TrunkPlacementResult | undefined {
-    return placementCacheByModel.get(modelId)?.get(key);
+    const cache = placementCacheByModel.get(modelId);
+    const entry = cache?.get(key);
+    if (!entry) return undefined;
+    if (!isCachedPlacementReusable(entry, Date.now())) {
+        cache!.delete(key);
+        return undefined;
+    }
+    return entry.result;
 }
 
 function setPlacementCache(modelId: string, key: string, result: TrunkPlacementResult): void {
@@ -195,13 +210,22 @@ function setPlacementCache(modelId: string, key: string, result: TrunkPlacementR
         // Evict oldest entry (first inserted)
         cache.delete(cache.keys().next().value!);
     }
-    cache.set(key, result);
+    cache.set(key, { result, cachedAt: Date.now() });
 }
+
+// Cached placements are only valid for the model position and support
+// settings they were computed under; a mismatch drops the model's cache.
+const placementCacheContextByModel = new Map<string, string>();
 
 /** Clear cached placement for a specific model (call when model moves). */
 export function clearPlacementCache(modelId?: string): void {
-    if (modelId) placementCacheByModel.delete(modelId);
-    else placementCacheByModel.clear();
+    if (modelId) {
+        placementCacheByModel.delete(modelId);
+        placementCacheContextByModel.delete(modelId);
+    } else {
+        placementCacheByModel.clear();
+        placementCacheContextByModel.clear();
+    }
 }
 
 export function buildTrunkData(input: TrunkBuildInput): TrunkBuildResult {
@@ -233,17 +257,29 @@ export function buildTrunkData(input: TrunkBuildInput): TrunkBuildResult {
         // Preview uses lower budget (800 expansions) for responsiveness.
         const v2Context = isPreview ? { maxExpansions: 800 } : undefined;
 
-        // Cache key: position + normal quantised at 0.5mm / 0.05 normal.
+        // Cache key: position + normal quantised at 0.1mm / 0.02 normal.
         // Only used for preview → preview reuse; click-time bypasses cache
         // to ensure fresh collision validation against any moved models.
         const cacheKey = isPreview ? placementCacheKey(tipPos, tipNormal) : null;
+        if (cacheKey) {
+            // Results are only reusable while the model sits where it sat and
+            // the support settings match — otherwise drop this model's cache.
+            const cacheContext = `${mesh.matrixWorld.elements.join(',')}|${encodeSupportSettingsHex(settings)}`;
+            if (placementCacheContextByModel.get(modelId) !== cacheContext) {
+                placementCacheByModel.delete(modelId);
+                placementCacheContextByModel.set(modelId, cacheContext);
+            }
+        }
         const cached = cacheKey ? getPlacementCache(modelId, cacheKey) : undefined;
 
         if (cached) {
             placement = cached;
         } else {
             perfMark('trunk:v2-placement');
-            const result = calculateSmartPlacementV2({ ...placementInput, mesh, modelId }, v2Context);
+            const result = calculateSmartPlacementV2(
+                { ...placementInput, mesh, modelId, shaftDiameterMm: overrides?.shaftDiameterMm },
+                v2Context,
+            );
             perfMeasureWithSpike('trunk:v2-placement', 'trunk:v2-placement');
             placement = result;
             if (cacheKey) {
@@ -258,6 +294,94 @@ export function buildTrunkData(input: TrunkBuildInput): TrunkBuildResult {
     const built = buildTrunkDataFromPlacement(input, placement);
     perfMeasureWithSpike('trunk:build-from-placement', 'trunk:build-from-placement');
     return built;
+}
+
+/**
+ * Angled-escape fallback for underbelly contact points.
+ *
+ * When the normal (vertical/A*-routed) trunk can't reach the build plate because
+ * the model sits directly below the contact — a COLLISION_WITH_MODEL the
+ * pathfinder couldn't resolve — this tries a single straight but TILTED shaft:
+ * the contact cone stays on the surface normal, but the plate base is offset
+ * outward (along the surface normal's horizontal direction, with a few yaw/tilt
+ * variations) so the shaft runs clear of the model down to the plate.
+ *
+ * A collinear construction joint is authored on the base→socket line so the
+ * built shaft is a single straight tilted segment — exactly the segment the
+ * collision test below clears (the default central joint would instead kink the
+ * shaft vertical-then-diagonal, which the straight-line test would not match).
+ *
+ * Returns a normal TrunkBuildResult on success, or one with error
+ * 'COLLISION_WITH_MODEL' if no clear tilt/direction was found.
+ */
+export function buildEscapeTrunkData(input: TrunkBuildInput): TrunkBuildResult {
+    const { tipPos, tipNormal, mesh, overrides } = input;
+    const settings = getSettings();
+    const tipProfile = buildTipProfile(settings, overrides);
+    const diskHeight = overrides?.rootsDiskHeightMm ?? settings.roots.diskHeightMm;
+    const coneHeight = overrides?.rootsConeHeightMm ?? settings.roots.coneHeightMm;
+    const rootsTopZ = diskHeight + coneHeight;
+    const shaftRadius = (overrides?.shaftDiameterMm ?? settings.shaft.diameterMm) / 2;
+
+    // Anchor the shaft top at the standard socket (contact cone stays on-normal).
+    const base = calculateStandardPlacement({ tipPos, tipNormal, tipProfile, rootsTopZ });
+    const socketPos = base.socketPos;
+    const fail = (): TrunkBuildResult =>
+        buildTrunkDataFromPlacement(input, { ...base, error: 'COLLISION_WITH_MODEL' });
+
+    // Horizontal escape direction = outward-facing part of the surface normal.
+    const hLen = Math.hypot(tipNormal.x, tipNormal.y);
+    const runZ = socketPos.z - rootsTopZ; // vertical rise available to tilt over
+    if (!mesh || hLen < 1e-3 || runZ < 2) {
+        // Near-vertical normal or too little height to tilt into — escape can't help.
+        return fail();
+    }
+    const hx = tipNormal.x / hLen;
+    const hy = tipNormal.y / hLen;
+
+    const clearanceR = shaftRadius + 0.2;
+    const TILTS_DEG = [18, 26, 34, 42, 48];
+    const YAWS_DEG = [0, 22, -22, 44, -44];
+
+    for (const tiltDeg of TILTS_DEG) {
+        const offset = runZ * Math.tan((tiltDeg * Math.PI) / 180);
+        for (const yawDeg of YAWS_DEG) {
+            const yaw = (yawDeg * Math.PI) / 180;
+            const cos = Math.cos(yaw);
+            const sin = Math.sin(yaw);
+            const dx = hx * cos - hy * sin;
+            const dy = hx * sin + hy * cos;
+            const shaftBottom: Vec3 = {
+                x: socketPos.x + dx * offset,
+                y: socketPos.y + dy * offset,
+                z: rootsTopZ,
+            };
+            if (isShaftBlocked(shaftBottom, socketPos, clearanceR, mesh)) continue;
+
+            // Clear tilted lane found — author a single straight tilted shaft.
+            const basePos: Vec3 = { x: shaftBottom.x, y: shaftBottom.y, z: 0 };
+            const t = 0.6;
+            const midJoint: Vec3 = {
+                x: shaftBottom.x + (socketPos.x - shaftBottom.x) * t,
+                y: shaftBottom.y + (socketPos.y - shaftBottom.y) * t,
+                z: shaftBottom.z + (socketPos.z - shaftBottom.z) * t,
+            };
+            const placement: TrunkPlacementResult = {
+                basePos,
+                socketPos,
+                unsnappedBottomPos: basePos,
+                snappedNodeKey: null,
+                joints: [],
+                constructionJoints: [midJoint],
+                error: undefined,
+                warning: base.warning,
+                angle: base.angle,
+                coneAxis: base.coneAxis,
+            };
+            return buildTrunkDataFromPlacement(input, placement);
+        }
+    }
+    return fail();
 }
 
 export function buildTrunkDataFromPlacement(input: TrunkBuildInput, placement: TrunkPlacementResult): TrunkBuildResult {

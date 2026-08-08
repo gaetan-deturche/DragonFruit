@@ -38,6 +38,7 @@ yarn-error.log*
 next-env.d.ts
 
 # local/project-specific
+/.claude/
 /.windsurf/
 /.vscode/
 /*.code-workspace
@@ -80,3 +81,7 @@ src-tauri/permissions.toml
 src-tauri/windows-resources/*.dll
 src-tauri/binaries/dragonfruit-voxl-thumbnailer*
 **/build
+# Editor swap files (vim leaves these next to the file being edited)
+*.swp
+*.swo
+*~

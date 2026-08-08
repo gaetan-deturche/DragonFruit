@@ -17,30 +17,291 @@ const AUTOSAVE_NAVIGATION_SETTLE_MS = 900;
 // Tauri helpers
 // ---------------------------------------------------------------------------
 
-type AutosavePaths = { voxlPath: string; manifestPath: string };
+export type AutosaveOrigin = 'sidecar' | 'recovery-dir';
+
+export type AutosavePaths = {
+  voxlPath: string;
+  manifestPath: string;
+  origin: AutosaveOrigin;
+  projectPath: string | null;
+  /** Set only when the sidecar target was unusable. See `resolve_scene_autosave_target`. */
+  fallbackReason: string | null;
+};
+
+export type AutosaveRecoveryCandidate = {
+  voxlPath: string;
+  origin: AutosaveOrigin;
+  savedAt: string | null;
+  clean: boolean;
+  projectPath: string | null;
+  payloadBytes: number;
+  fallbackReason: string | null;
+};
+
+/** Minimal shape of `@tauri-apps/api/core`'s `invoke`, so tests can inject one. */
+export type AutosaveInvoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+
+async function desktopInvoke(): Promise<AutosaveInvoke> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke as AutosaveInvoke;
+}
 
 let cachedPaths: AutosavePaths | null = null;
 let cachedPreferredSavePath: string | null | undefined;
+let warnedFallbackFor: string | null = null;
 
-async function getAutosavePaths(preferredSavePath?: string | null): Promise<AutosavePaths> {
-  // Invalidate cache if preferredSavePath changes
+/** Drops the resolved-path cache. Used by tests, which would otherwise leak it between cases. */
+export function resetAutosavePathCache(): void {
+  cachedPaths = null;
+  cachedPreferredSavePath = undefined;
+  warnedFallbackFor = null;
+}
+
+/**
+ * Resolves the autosave target at **tick time** (finding N3).
+ *
+ * The cache is keyed on the project path, so a Save As to a new folder moves the
+ * sidecar with it instead of writing next to the old project forever. A resolved
+ * *fallback* is deliberately never cached: falling back means the project folder
+ * was unusable at that moment (read-only, permission-denied, disconnected
+ * share), which is exactly the kind of condition that clears — re-probing costs
+ * one syscall per tick and lets the sidecar come back on its own.
+ */
+export async function resolveAutosavePaths(
+  invoke: AutosaveInvoke,
+  preferredSavePath?: string | null,
+): Promise<AutosavePaths> {
   if (cachedPaths && preferredSavePath !== cachedPreferredSavePath) {
     cachedPaths = null;
   }
   if (cachedPaths) return cachedPaths;
-  const { invoke } = await import('@tauri-apps/api/core');
+
   const result = await invoke<AutosavePaths>(
     'scene_autosave_get_paths',
     preferredSavePath ? { preferredSavePath } : {},
   );
+
+  if (result.fallbackReason) {
+    // Never fail an autosave over a folder-policy question — but never hide it
+    // either. Warned once per distinct project so a 30 s tick cannot spam.
+    const key = `${preferredSavePath ?? ''}:${result.fallbackReason}`;
+    if (warnedFallbackFor !== key) {
+      warnedFallbackFor = key;
+      console.warn(
+        `[SceneAutosave] Cannot write a recovery file beside this project (${result.fallbackReason}); `
+        + `using the default recovery location instead: ${result.voxlPath}`,
+      );
+    }
+    cachedPaths = null;
+    cachedPreferredSavePath = undefined;
+    return result;
+  }
+
+  warnedFallbackFor = null;
   cachedPaths = result;
   cachedPreferredSavePath = preferredSavePath;
-  return cachedPaths;
+  return result;
 }
 
-async function writeManifest(savedAt: string, clean: boolean): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('scene_autosave_write_manifest', { savedAt, clean });
+async function getAutosavePaths(preferredSavePath?: string | null): Promise<AutosavePaths> {
+  return resolveAutosavePaths(await desktopInvoke(), preferredSavePath);
+}
+
+// ---------------------------------------------------------------------------
+// Failure honesty (sub-phase D3, finding N4)
+// ---------------------------------------------------------------------------
+
+/**
+ * How many consecutive failures before the user is interrupted.
+ *
+ * One is a transient: an antivirus holding the destination, a share blinking,
+ * a rename losing a race. Two in a row across a 30 s debounce is a condition,
+ * not a blip — and a condition the user can usually act on (free disk, remove a
+ * model, save elsewhere).
+ */
+export const AUTOSAVE_FAILURE_NOTIFY_THRESHOLD = 2;
+
+export type AutosaveFailureOutcome = {
+  consecutiveFailures: number;
+  /** True exactly once per outage, at the threshold. */
+  shouldNotifyUser: boolean;
+  message: string;
+};
+
+/**
+ * Tracks the autosave's honesty state (finding N4).
+ *
+ * Before this, failures were swallowed with a `console.warn` and the manifest
+ * was written only on success. An autosave that had been failing for an hour
+ * presented as a stale "unsaved changes from <time>" prompt with no signal at
+ * all — and it is the surface the 4 GiB guard (D1) fails into, so the two had to
+ * land together.
+ *
+ * The rule the class exists to enforce: **a failed tick never advances the
+ * timestamp recovery shows the user.** `saved_at` keeps naming the last payload
+ * that actually reached disk, and the error rides alongside it.
+ */
+export class AutosaveFailureTracker {
+  private consecutive = 0;
+
+  private error: string | null = null;
+
+  private successAt: string | null = null;
+
+  get lastError(): string | null {
+    return this.error;
+  }
+
+  /** ISO timestamp of the last payload that actually committed. */
+  get lastSuccessAt(): string | null {
+    return this.successAt;
+  }
+
+  get consecutiveFailures(): number {
+    return this.consecutive;
+  }
+
+  recordSuccess(savedAt: string): void {
+    this.consecutive = 0;
+    this.error = null;
+    this.successAt = savedAt;
+  }
+
+  recordFailure(error: unknown): AutosaveFailureOutcome {
+    const message = error instanceof Error
+      ? error.message
+      : String(error ?? 'Unknown autosave failure');
+    this.consecutive += 1;
+    this.error = message;
+    return {
+      consecutiveFailures: this.consecutive,
+      // Strictly `===`, not `>=`: a 30 s tick against a persistent condition
+      // would otherwise interrupt the user twice a minute forever.
+      shouldNotifyUser: this.consecutive === AUTOSAVE_FAILURE_NOTIFY_THRESHOLD,
+      message,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Contention policy (sub-phase D4)
+// ---------------------------------------------------------------------------
+
+export type AutosaveGateInput = {
+  enabled: boolean;
+  desktop: boolean;
+  /** Epoch ms until which `suppressSceneAutosave` holds ticks off. */
+  suppressedUntil: number;
+  now: number;
+  modelCount: number;
+  navigationBusy: boolean;
+  /** An explicit flush: quit, or a hand-off from the save path. */
+  forced: boolean;
+};
+
+export type AutosaveGateDecision =
+  | { action: 'run' }
+  | { action: 'defer'; reason: 'navigation' | 'suppressed'; retainDirty: true }
+  | { action: 'skip'; reason: 'disabled' | 'not-desktop' | 'empty-scene'; retainDirty: boolean };
+
+/**
+ * Decides whether a tick runs now, later, or not at all.
+ *
+ * Sub-phase A's single-flight lock already made an overlapping native write
+ * **safe**; this makes it **cheap**, and — more importantly — makes the
+ * defer-vs-skip choice explicit rather than an emergent property of early
+ * returns.
+ *
+ * The load-bearing half is `retainDirty`. The old control flow cleared the dirty
+ * flag before every one of these checks, so edits made during a slice, a hollow,
+ * or a suppression window were silently forgotten and waited for the *next*
+ * unrelated history push to be persisted at all. Deferring keeps the scene
+ * dirty; only "there is genuinely nothing to save" (an empty scene) and "this
+ * build cannot save" (browser) drop it.
+ *
+ * A forced flush overrides both defer reasons: it is the quit path and the
+ * explicit hand-off, where waiting means losing the work outright.
+ */
+export function decideAutosaveGate(input: AutosaveGateInput): AutosaveGateDecision {
+  if (!input.desktop) return { action: 'skip', reason: 'not-desktop', retainDirty: false };
+  if (!input.enabled) return { action: 'skip', reason: 'disabled', retainDirty: true };
+  if (input.modelCount === 0) return { action: 'skip', reason: 'empty-scene', retainDirty: false };
+
+  if (!input.forced) {
+    if (input.now < input.suppressedUntil) {
+      return { action: 'defer', reason: 'suppressed', retainDirty: true };
+    }
+    if (input.navigationBusy) {
+      return { action: 'defer', reason: 'navigation', retainDirty: true };
+    }
+  }
+
+  return { action: 'run' };
+}
+
+export type WriteManifestOptions = {
+  voxlPath?: string | null;
+  origin?: string | null;
+  projectPath?: string | null;
+  payloadBytes?: number | null;
+  fallbackReason?: string | null;
+  /**
+   * Records why the last tick failed (D3 / N4). When set, the backend preserves
+   * the previous manifest's `savedAt` and payload pointer, so recovery keeps
+   * naming the last file that actually committed.
+   */
+  lastError?: string | null;
+  /**
+   * Deletes the advertised payload as well as marking the manifest clean.
+   * **Only ever passed when there is no unsaved work to lose** — after a
+   * successful save, a successful restore, or an explicit discard.
+   */
+  deletePayload?: boolean;
+};
+
+async function writeManifest(
+  savedAt: string,
+  clean: boolean,
+  options: WriteManifestOptions = {},
+): Promise<void> {
+  const invoke = await desktopInvoke();
+  await invoke('scene_autosave_write_manifest', {
+    savedAt,
+    clean,
+    voxlPath: options.voxlPath ?? null,
+    origin: options.origin ?? null,
+    projectPath: options.projectPath ?? null,
+    payloadBytes: options.payloadBytes ?? null,
+    fallbackReason: options.fallbackReason ?? null,
+    lastError: options.lastError ?? null,
+    deletePayload: options.deletePayload ?? false,
+  });
+}
+
+/**
+ * The single entry point for recovery discovery. Resolves, in order: the
+ * manifest's committed `voxlPath` → the sidecar derived from its `projectPath` →
+ * the legacy generic location → none.
+ */
+export async function resolveAutosaveRecovery(): Promise<AutosaveRecoveryCandidate | null> {
+  const invoke = await desktopInvoke();
+  return invoke<AutosaveRecoveryCandidate | null>('scene_autosave_resolve_recovery');
+}
+
+/** Reads a recovery payload. The backend accepts only its own candidates. */
+export async function readAutosaveRecoveryBytes(path: string | null): Promise<ArrayBuffer> {
+  const invoke = await desktopInvoke();
+  return invoke<ArrayBuffer>('scene_autosave_read_voxl_bytes', path ? { path } : {});
+}
+
+/**
+ * Removes the sidecar belonging to `projectPath`. Used on Save As against the
+ * **old** project, so a rename never leaves an orphaned `_autosave.voxl` implying
+ * unsaved work that does not exist.
+ */
+export async function deleteAutosaveSidecarForProject(projectPath: string): Promise<void> {
+  const invoke = await desktopInvoke();
+  await invoke('scene_autosave_delete_sidecar', { projectPath });
 }
 
 function isDesktopRuntime(): boolean {
@@ -64,9 +325,18 @@ export type UseSceneAutosaveOptions = {
 export type UseSceneAutosaveResult = {
   isAutosaving: boolean;
   lastAutosaveAt: string | null;
+  /** Message from the most recent failed tick, or null while autosave is healthy (D3). */
+  lastAutosaveError: string | null;
   clearAutosave: () => Promise<void>;
   flushAutosave: () => Promise<void>;
 };
+
+/**
+ * Fired once per outage, after {@link AUTOSAVE_FAILURE_NOTIFY_THRESHOLD}
+ * consecutive failures. `page.tsx` turns it into a modal; the settings tab shows
+ * the standing state regardless.
+ */
+export const SCENE_AUTOSAVE_FAILED_EVENT = 'scene-autosave-failed';
 
 export function useSceneAutosave({
   models,
@@ -79,6 +349,8 @@ export function useSceneAutosave({
 }: UseSceneAutosaveOptions): UseSceneAutosaveResult {
   const [isAutosaving, setIsAutosaving] = React.useState(false);
   const [lastAutosaveAt, setLastAutosaveAt] = React.useState<string | null>(null);
+  const [lastAutosaveError, setLastAutosaveError] = React.useState<string | null>(null);
+  const failureTrackerRef = React.useRef(new AutosaveFailureTracker());
 
   // Keep stable refs so the debounce callback always sees fresh values
   const modelsRef = React.useRef(models);
@@ -116,12 +388,16 @@ export function useSceneAutosave({
     return navigationActiveRef.current || Date.now() < navigationQuietUntilRef.current;
   }, []);
 
-  const scheduleDeferredAutosave = React.useCallback((perform: () => void) => {
+  const scheduleDeferredAutosave = React.useCallback((perform: () => void, notBeforeMs = 0) => {
     clearDeferredAutosave();
 
+    // `notBeforeMs` lets a suppression-deferred tick wake when the window
+    // actually closes instead of re-checking every settle interval for the whole
+    // length of a long import or hollow (D4).
     const delay = Math.max(
       AUTOSAVE_NAVIGATION_SETTLE_MS,
       navigationQuietUntilRef.current - Date.now(),
+      notBeforeMs - Date.now(),
       0,
     );
 
@@ -139,19 +415,32 @@ export function useSceneAutosave({
     }
 
     const run = async () => {
-      if (!enabledRef.current) return;
-      if (!isDesktopRuntime()) return;
-      if (Date.now() < sceneAutosaveSuppressRef.current) return;
+      const currentModels = modelsRef.current;
 
-      if (!options?.force && shouldDeferAutosaveForNavigation()) {
-        scheduleDeferredAutosave(() => {
-          void performAutosave();
-        });
+      // One explicit policy decision instead of five early returns, so
+      // "does the dirtiness survive this?" is answerable by reading it (D4).
+      const decision = decideAutosaveGate({
+        enabled: enabledRef.current,
+        desktop: isDesktopRuntime(),
+        suppressedUntil: sceneAutosaveSuppressRef.current,
+        now: Date.now(),
+        modelCount: currentModels.length,
+        navigationBusy: shouldDeferAutosaveForNavigation(),
+        forced: options?.force === true,
+      });
+
+      if (decision.action !== 'run') {
+        if (!decision.retainDirty) dirtyRef.current = false;
+        if (decision.action === 'defer') {
+          // Re-arm rather than drop. `scheduleDeferredAutosave` no-ops when the
+          // scene is not dirty, so this cannot spin on a clean scene.
+          scheduleDeferredAutosave(
+            () => { void performAutosave(); },
+            decision.reason === 'suppressed' ? sceneAutosaveSuppressRef.current : 0,
+          );
+        }
         return;
       }
-
-      const currentModels = modelsRef.current;
-      if (currentModels.length === 0) return;
 
       clearDeferredAutosave();
       inFlightRef.current = true;
@@ -159,7 +448,11 @@ export function useSceneAutosave({
       setIsAutosaving(true);
 
       try {
-        const { voxlPath } = await getAutosavePaths(preferredSavePathRef.current);
+        // Resolved per tick, not per render: `preferredSavePathRef` now tracks
+        // `activeSceneFilePath` state, so a Save As moves the sidecar with the
+        // project instead of stranding it beside the old one (finding N3).
+        const paths = await getAutosavePaths(preferredSavePathRef.current);
+        const { voxlPath } = paths;
 
         await ExportManager.exportScene(
           null,
@@ -181,11 +474,58 @@ export function useSceneAutosave({
           { nativePath: voxlPath },
         );
 
+        // Ordering is load-bearing and must stay this way: payload first, then
+        // manifest. `exportScene` above commits the VOXL through the atomic
+        // writer (temp → fsync → rename, ExportManager.downloadFile), so by the
+        // time the manifest is written the file it advertises is guaranteed to
+        // be complete. A manifest written first — or written on a failed
+        // export — would point recovery at a file that may not exist or may be
+        // half a scene. Sub-phase B relies on exactly this: `voxlPath` below is
+        // what makes the manifest authoritative for recovery, and it is only
+        // trustworthy because it is written after the commit.
         const savedAt = new Date().toISOString();
-        await writeManifest(savedAt, false);
+        await writeManifest(savedAt, false, {
+          voxlPath,
+          origin: paths.origin,
+          projectPath: paths.projectPath,
+          fallbackReason: paths.fallbackReason,
+        });
+        failureTrackerRef.current.recordSuccess(savedAt);
         setLastAutosaveAt(savedAt);
+        setLastAutosaveError(null);
       } catch (err) {
+        // Failure honesty (D3 / N4). The old code was a bare `console.warn`, and
+        // because the manifest is written only after a successful payload, a
+        // failing autosave was indistinguishable from a quiet one until the user
+        // hit recovery and found hour-old work.
+        //
+        // Three things happen now: the error is recorded in the manifest beside
+        // the LAST GOOD `savedAt` (never overwriting it), it is surfaced in the
+        // autosave settings tab, and a persistent outage interrupts the user
+        // once. This is also the surface the 4 GiB guard (D1) fails into.
+        const outcome = failureTrackerRef.current.recordFailure(err);
+        setLastAutosaveError(outcome.message);
         console.warn('[SceneAutosave] Autosave failed:', err);
+
+        try {
+          await writeManifest(
+            failureTrackerRef.current.lastSuccessAt ?? new Date().toISOString(),
+            false,
+            { lastError: outcome.message },
+          );
+        } catch (manifestError) {
+          console.warn('[SceneAutosave] Could not record the autosave failure either.', manifestError);
+        }
+
+        if (outcome.shouldNotifyUser && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent(SCENE_AUTOSAVE_FAILED_EVENT, {
+            detail: {
+              message: outcome.message,
+              consecutiveFailures: outcome.consecutiveFailures,
+              lastSuccessAt: failureTrackerRef.current.lastSuccessAt,
+            },
+          }));
+        }
       } finally {
         inFlightRef.current = false;
         setIsAutosaving(false);
@@ -204,8 +544,15 @@ export function useSceneAutosave({
   }, []);
 
   const scheduleSave = React.useCallback(() => {
-    if (!enabledRef.current || !isDesktopRuntime()) return;
+    if (!isDesktopRuntime()) return;
+
+    // Mark dirty BEFORE the enabled check (D4). Autosave is disabled outright
+    // during slicing and printing (`page.tsx`), and the old order meant every
+    // edit made in those windows never marked the scene dirty at all — it
+    // waited for the next unrelated history push to be persisted. Recording it
+    // here costs nothing and means the window closing is enough to fire a tick.
     dirtyRef.current = true;
+    if (!enabledRef.current) return;
 
     // Reset the debounce window
     if (debounceRef.current !== null) {
@@ -325,10 +672,20 @@ export function useSceneAutosave({
     };
   }, []);
 
+  /**
+   * Marks the autosave clean **and deletes the payload**.
+   *
+   * A `_autosave.voxl` lingering beside a saved project is user-visible clutter
+   * that implies unsaved work which does not exist. Deleting is safe only
+   * because every caller runs after the work is already secured — a successful
+   * explicit save, a successful restore, or an explicit discard. It is
+   * deliberately NOT called on a clean exit that still has unsaved changes; see
+   * `handleRequestProgramClose` in `page.tsx`.
+   */
   const clearAutosave = React.useCallback(async () => {
     if (!isDesktopRuntime()) return;
     try {
-      await writeManifest(new Date().toISOString(), true);
+      await writeManifest(new Date().toISOString(), true, { deletePayload: true });
     } catch (err) {
       console.warn('[SceneAutosave] Failed marking autosave clean:', err);
     }
@@ -351,7 +708,7 @@ export function useSceneAutosave({
     await performAutosave({ force: true });
   }, [clearDeferredAutosave, performAutosave]);
 
-  return { isAutosaving, lastAutosaveAt, clearAutosave, flushAutosave };
+  return { isAutosaving, lastAutosaveAt, lastAutosaveError, clearAutosave, flushAutosave };
 }
 
 // ---------------------------------------------------------------------------

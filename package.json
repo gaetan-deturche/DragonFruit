@@ -1,6 +1,6 @@
 {
   "name": "dragonfruit",
-  "version": "0.1.9",
+  "version": "0.1.12",
   "buildChannel": "beta",
   "private": true,
   "scripts": {
@@ -22,8 +22,8 @@
     "pretauri:bundle:macos": "npm run sync:version",
     "pretauri:bundle:macos:arm64": "npm run sync:version",
     "pretauri:bundle:macos:universal": "npm run sync:version",
-    "dev": "next dev -p 3005",
-    "nas": "next dev -p 3005 --webpack",
+    "dev": "next dev -p 3006",
+    "nas": "next dev -p 3006 --webpack",
     "build": "next build",
     "build:tauri": "next build && node scripts/prepare-tauri-frontend.mjs",
     "start": "next start",
@@ -38,12 +38,14 @@
     "macos:thumbnails": "node scripts/macos-thumbnails.mjs",
     "guard:plugin-boundaries": "node scripts/check-plugin-boundaries.mjs",
     "lint": "eslint",
-    "test": "node --import tsx --test src/**/__tests__/*.test.ts",
-    "test:watch": "node --import tsx --test --watch src/**/__tests__/*.test.ts",
+    "pretest": "npm run generate:plugin-registry && npm run generate:builtin-simple-plugins",
+    "test": "node --import tsx --test 'src/**/*.test.{ts,tsx}'",
+    "test:watch": "node --import tsx --test --watch 'src/**/*.test.{ts,tsx}'",
     "bench:support-drag": "node --import tsx scripts/support-drag-perf.ts",
-    "i18n:extract": "lingui extract",
+    "bench:voxl-tick": "node --max-old-space-size=8192 --import tsx scripts/bench-voxl-tick.ts",
+    "i18n:extract": "lingui extract --clean",
     "i18n:compile": "lingui compile",
-    "i18n:update": "lingui extract && lingui compile"
+    "i18n:update": "lingui extract --clean && lingui compile"
   },
   "dependencies": {
     "@lingui/core": "^6.3.0",
@@ -67,14 +69,16 @@
     "jszip": "^3.10.1",
     "lucide-react": "^0.563.0",
     "manifold-3d": "^3.4.1",
-    "next": "^16.2.6",
+    "next": "^16.2.11",
     "react": "19.2.0",
     "react-colorful": "^5.6.1",
     "react-dom": "19.2.0",
     "react-markdown": "^10.1.0",
     "three": "^0.181.0",
+    "three-mesh-bvh": "^0.8.3",
     "three-stdlib": "^2.36.1",
-    "uuid": "^13.0.0"
+    "uuid": "^14.0.0",
+    "zustand": "^5.0.8"
   },
   "devDependencies": {
     "@lingui/cli": "^6.3.0",
@@ -83,9 +87,10 @@
     "@tailwindcss/typography": "^0.5.20",
     "@tauri-apps/cli": "^2.8.0",
     "@types/express": "^5.0.6",
-    "@types/node": "^20",
+    "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "^0.181.0",
     "babel-plugin-react-compiler": "1.0.0",
     "baseline-browser-mapping": "^2.9.4",
     "eslint": "^9.39.3",

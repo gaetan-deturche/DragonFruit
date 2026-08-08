@@ -36,8 +36,8 @@ import {
   subscribe,
 } from '@/supports/state';
 import { registerDeleteHandler } from '@/features/delete/deleteRegistry';
-import { pushHistory } from '@/history/historyStore';
-import { SUPPORT_REMOVE_ANCHOR, SUPPORT_REMOVE_BRANCH, SUPPORT_REMOVE_BRACE, SUPPORT_REMOVE_LEAF, SUPPORT_REMOVE_TRUNK, SUPPORT_UPDATE_TRUNK, SUPPORT_UPDATE_BRANCH, SUPPORT_REMOVE_TWIG, SUPPORT_REMOVE_STICK, SUPPORT_AUTO_BRACE_REPLACE, SUPPORT_REMOVE_KICKSTAND } from '@/supports/history/actionTypes';
+import { pushSupportHistory } from '@/supports/history/supportHistory';
+import { SUPPORT_REMOVE_ANCHOR, SUPPORT_REMOVE_BRANCH, SUPPORT_REMOVE_BRACE, SUPPORT_REMOVE_LEAF, SUPPORT_REMOVE_TRUNK, SUPPORT_UPDATE_TRUNK, SUPPORT_UPDATE_BRANCH, SUPPORT_REMOVE_TWIG, SUPPORT_REMOVE_STICK, SUPPORT_AUTO_BRACE_REPLACE, SUPPORT_REMOVE_KICKSTAND, type SupportBranchRemovePayload } from '@/supports/history/actionTypes';
 import { clearSupportSelection, getResolvedPrimarySelection, selectSupportIds } from '@/supports/interaction/shared/selection/selectionController';
 import { getKickstandSnapshot } from '@/supports/SupportTypes/Kickstand/kickstandStore';
 import { useHotkeyConfig } from '@/hotkeys/HotkeyContext';
@@ -140,11 +140,6 @@ function resolveSupportOwnerFromJointId(jointId: string): { category: 'brace'; i
   return null;
 }
 
-function getNativeEventSource(source: unknown): unknown {
-  if (!source || typeof source !== 'object') return null;
-  return (source as { nativeEvent?: unknown }).nativeEvent ?? null;
-}
-
 export function useSupportInteractionManager({ mode }: SupportInteractionOptions) {
   // V2 Trunk Placement
   const trunkPlacementV2 = useTrunkPlacementV2();
@@ -155,6 +150,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
   const { getHotkey } = useHotkeyConfig();
 
   const altDownRef = useRef(false);
+  const deletingRef = useRef(false);
 
   // V2 Joint Creation State
   useJointCreationHotkey(mode);
@@ -170,7 +166,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
 
   const selectedJointId = globalSelectedCategory === 'joint' ? globalSelectedId : null;
 
-  const resolvePlacementRouting = useCallback((source: unknown) => {
+  const resolvePlacementRouting = useCallback(() => {
     const bindings = resolveSupportPlacementHotkeyBindings(getHotkey);
     return resolveSupportPlacementRouting({
       bindings,
@@ -194,8 +190,6 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
 
   // Handler for MODEL hover (used for trunk placement preview, or branch tip preview)
   const onModelHover = useCallback((hit: THREE.Intersection | null) => {
-    const nativeEvent = getNativeEventSource(hit);
-
     if (isSupportEditInteractionActive()) {
       trunkPlacementV2.onSupportHover(null);
       branchPlacement.onModelHover(null);
@@ -232,7 +226,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
       return;
     }
 
-    const routing = resolvePlacementRouting(nativeEvent ?? hit);
+    const routing = resolvePlacementRouting();
 
     if (routing.modelHoverOwner === 'leaf') {
       trunkPlacementV2.onSupportHover(null);
@@ -260,8 +254,6 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
 
   // Handler for MODEL click (trunk placement, or branch tip placement)
   const onModelClick = useCallback((hit: THREE.Intersection) => {
-    const nativeEvent = getNativeEventSource(hit);
-
     if (isSupportEditInteractionActive()) {
       return;
     }
@@ -276,7 +268,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
       return;
     }
 
-    const routing = resolvePlacementRouting(nativeEvent ?? hit);
+    const routing = resolvePlacementRouting();
 
     if (routing.modelClickOwner === 'leaf') {
       leafPlacement.onModelClick(hit);
@@ -315,8 +307,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
       return;
     }
 
-    const nativeEvent = getNativeEventSource(hit);
-    const routing = resolvePlacementRouting(nativeEvent ?? hit);
+    const routing = resolvePlacementRouting();
 
     if (routing.supportHoverOwner === 'leaf') {
       leafPlacement.onSupportHover(hit);
@@ -344,8 +335,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
       return;
     }
 
-    const nativeEvent = getNativeEventSource(hit);
-    const routing = resolvePlacementRouting(nativeEvent ?? hit);
+    const routing = resolvePlacementRouting();
 
     if (routing.blocksDefaultSupportPlacement) {
       return;
@@ -372,21 +362,26 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         }
         if (result.kind === 'trunk') {
           if (recordHistory) {
-            pushHistory({
+            pushSupportHistory({
               type: SUPPORT_UPDATE_TRUNK,
               description: 'Delete trunk joint',
               payload: { before: result.before, after: result.after },
             });
           }
           setSelectedId(result.trunkId);
-        } else {
+        } else if (result.kind === 'branch') {
           if (recordHistory) {
-            pushHistory({
+            pushSupportHistory({
               type: SUPPORT_UPDATE_BRANCH,
               payload: { before: result.before, after: result.after },
             });
           }
           setSelectedId(result.branchId);
+        } else if (result.kind === 'kickstand') {
+          // Joint removed from kickstand — just select the parent kickstand.
+          // No dedicated SUPPORT_UPDATE_KICKSTAND history type exists yet,
+          // so undo is handled via full state snapshot if needed.
+          setSelectedId(result.kickstandId);
         }
         return true;
       }
@@ -401,7 +396,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         const snapshots = removeTrunk(id);
         if (!snapshots) return false;
         if (recordHistory) {
-          pushHistory({
+          pushSupportHistory({
             type: SUPPORT_REMOVE_TRUNK,
             payload: {
               trunk: snapshots.trunk,
@@ -422,7 +417,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         const snapshots = removeLeaf(id);
         if (!snapshots) return false;
         if (recordHistory) {
-          pushHistory({
+          pushSupportHistory({
             type: SUPPORT_REMOVE_LEAF,
             payload: { leaf: snapshots.leaf, knot: snapshots.knot ?? undefined },
           });
@@ -438,7 +433,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
           const snapshots = removeLeaf(leaf.id);
           if (!snapshots) return false;
           if (recordHistory) {
-            pushHistory({
+            pushSupportHistory({
               type: SUPPORT_REMOVE_LEAF,
               payload: { leaf: snapshots.leaf, knot: snapshots.knot ?? undefined },
             });
@@ -455,8 +450,8 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
           if (!snapshots) return false;
           const afterSnapshot = getSnapshot();
 
-          let trunkUpdate: { before: unknown; after: unknown } | undefined;
-          let knotUpdates: unknown[] | undefined;
+          let trunkUpdate: SupportBranchRemovePayload['trunkUpdate'];
+          let knotUpdates: SupportBranchRemovePayload['knotUpdates'];
           const parentKnot = branch.parentKnotId ? beforeSnapshot.knots[branch.parentKnotId] : undefined;
           const parentSegId = parentKnot?.parentShaftId;
           const trunkId = parentSegId
@@ -477,7 +472,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
           }
 
           if (recordHistory) {
-            pushHistory({
+            pushSupportHistory({
               type: SUPPORT_REMOVE_BRANCH,
               payload: {
                 ...snapshots,
@@ -496,7 +491,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
           const snapshots = removeBrace(brace.id);
           if (!snapshots) return false;
           if (recordHistory) {
-            pushHistory({
+            pushSupportHistory({
               type: SUPPORT_REMOVE_BRACE,
               payload: { brace: snapshots.brace, startKnot: snapshots.startKnot ?? undefined, endKnot: snapshots.endKnot ?? undefined },
             });
@@ -511,7 +506,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
           const kickstandSnapshots = removeKickstandCascade(kickstand.id);
           if (!kickstandSnapshots) return false;
           if (recordHistory) {
-            pushHistory({
+            pushSupportHistory({
               type: SUPPORT_REMOVE_KICKSTAND,
               payload: kickstandSnapshots,
             });
@@ -529,8 +524,8 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         if (!snapshots) return false;
         const afterSnapshot = getSnapshot();
 
-        let trunkUpdate: { before: unknown; after: unknown } | undefined;
-        let knotUpdates: unknown[] | undefined;
+        let trunkUpdate: SupportBranchRemovePayload['trunkUpdate'];
+        let knotUpdates: SupportBranchRemovePayload['knotUpdates'];
         const removedRootBranch = snapshots.branches.find(b => b.id === id) ?? snapshots.branches[0];
         const parentKnot = removedRootBranch?.parentKnotId ? beforeSnapshot.knots[removedRootBranch.parentKnotId] : undefined;
         const parentSegId = parentKnot?.parentShaftId;
@@ -552,7 +547,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         }
 
         if (recordHistory) {
-          pushHistory({
+          pushSupportHistory({
             type: SUPPORT_REMOVE_BRANCH,
             payload: {
               ...snapshots,
@@ -569,7 +564,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         const snapshots = removeTwig(id);
         if (!snapshots) return false;
         if (recordHistory) {
-          pushHistory({
+          pushSupportHistory({
             type: SUPPORT_REMOVE_TWIG,
             payload: snapshots,
           });
@@ -582,7 +577,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         const snapshots = removeStick(id);
         if (!snapshots) return false;
         if (recordHistory) {
-          pushHistory({
+          pushSupportHistory({
             type: SUPPORT_REMOVE_STICK,
             payload: snapshots,
           });
@@ -595,7 +590,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         const snapshots = removeAnchor(id);
         if (!snapshots) return false;
         if (recordHistory) {
-          pushHistory({
+          pushSupportHistory({
             type: SUPPORT_REMOVE_ANCHOR,
             payload: { anchor: snapshots.anchor },
           });
@@ -608,7 +603,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         const kickstandSnapshots = removeKickstandCascade(id);
         if (kickstandSnapshots) {
           if (recordHistory) {
-            pushHistory({
+            pushSupportHistory({
               type: SUPPORT_REMOVE_KICKSTAND,
               payload: kickstandSnapshots,
             });
@@ -620,7 +615,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         const snapshots = removeBrace(id);
         if (!snapshots) return false;
         if (recordHistory) {
-          pushHistory({
+          pushSupportHistory({
             type: SUPPORT_REMOVE_BRACE,
             payload: { brace: snapshots.brace, startKnot: snapshots.startKnot ?? undefined, endKnot: snapshots.endKnot ?? undefined },
           });
@@ -667,6 +662,9 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
     };
 
     const performDeleteSelection = () => {
+      if (deletingRef.current) return;
+      deletingRef.current = true;
+      try {
       const multiSelectedIds = Array.from(new Set(getResolvedPrimarySelection().selectedIds));
       if (multiSelectedIds.length > 0) {
         const beforeSupportSnapshot = structuredClone(getSnapshot());
@@ -683,7 +681,7 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
           const afterSupportSnapshot = structuredClone(getSnapshot());
           const afterKickstandSnapshot = structuredClone(getKickstandSnapshot());
 
-          pushHistory({
+          pushSupportHistory({
             type: SUPPORT_AUTO_BRACE_REPLACE,
             description: `Delete ${multiSelectedIds.length} supports`,
             payload: {
@@ -707,6 +705,9 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
       deleteSelectionByCategoryAndId(category, id);
 
       setHoveredState('none', null);
+      } finally {
+        deletingRef.current = false;
+      }
     };
 
     const onKeyDown = (e: CustomEvent) => {
@@ -741,11 +742,12 @@ export function useSupportInteractionManager({ mode }: SupportInteractionOptions
         return;
       }
 
-      if (!metaKey && !ctrlKey && (key === 'Delete' || key === 'Backspace')) {
-        if (!canDeleteSelection()) return;
-        performDeleteSelection();
-        return;
-      }
+      // Deletion is handled centrally through the delete registry (registered
+      // below with priority 100), which honors the configurable GLOBAL.DELETE
+      // binding plus the fixed `Delete` secondary key. No inline delete here.
+      // Delete/Backspace is handled by the delete registry (registerDeleteHandler)
+      // — do NOT handle it here or it fires twice: once here (removes the joint,
+      // selects the parent) and once via triggerDelete() (deletes the parent).
 
       if (key === 'Escape') {
         if (getSelectedId() || getResolvedPrimarySelection().selectedIds.length > 0) {

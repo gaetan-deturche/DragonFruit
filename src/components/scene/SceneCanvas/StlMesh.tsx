@@ -184,6 +184,7 @@ function StlMeshComponent({
   onSupportClick,
   onHolePunchClick,
   onHolePunchHover,
+  onOrganicCutClick,
   onSupportHover,
   onActiveModelChange,
   disableRaycast,
@@ -215,6 +216,8 @@ function StlMeshComponent({
   isExternallyHovered,
   deferExternalTransformUpdates,
   supportSectionGeometry,
+  modelSectionGeometry,
+  nonManifold = false,
   higherContrastModelEdges = false,
   edgeGeometry,
   blockerEditMode = false,
@@ -256,6 +259,7 @@ function StlMeshComponent({
   onSupportClick?: (hit: THREE.Intersection) => void;
   onHolePunchClick?: (hit: THREE.Intersection) => void;
   onHolePunchHover?: (hit: THREE.Intersection | null) => void;
+  onOrganicCutClick?: (hit: THREE.Intersection) => void;
   onSupportHover?: (hit: THREE.Intersection | null) => void;
   onActiveModelChange?: (id: string | null, options?: { selectionMode?: 'single' | 'toggle' | 'add' }) => void;
   disableRaycast?: boolean;
@@ -296,6 +300,13 @@ function StlMeshComponent({
   /** When present (model+support mixed import), this geometry contains only the support-section
    *  triangles and is rendered as an orange overlay on top of the main mesh. */
   supportSectionGeometry?: THREE.BufferGeometry | null;
+  /** When present (model+support mixed import), this geometry contains only the model-section
+   *  (part) triangles. The non-manifold red overlay is scoped to this so it never stripes the
+   *  supports. Falls back to the full geometry when there is no split (whole mesh is the part). */
+  modelSectionGeometry?: THREE.BufferGeometry | null;
+  /** When true, the model failed the manifold_csg status check (any non-manifold
+   *  status). A red/clear checkerboard pattern is overlaid on the part to flag it. */
+  nonManifold?: boolean;
   children?: React.ReactNode;
 }) {
   // Access GPU picking state to detect gizmo hover
@@ -304,6 +315,11 @@ function StlMeshComponent({
   const [isPointerHovered, setIsPointerHovered] = React.useState(false);
   const { camera } = useThree();
   const suppressNextHolePunchClickRef = React.useRef(false);
+  // Same idea as hole-punch: when a pointer-down lands on a not-yet-active model
+  // (a reselection click), suppress the FOLLOWING click so it only selects the
+  // model instead of also dropping a cut waypoint. Captured at pointer-down
+  // because by click time the model may already have become active.
+  const suppressNextOrganicCutClickRef = React.useRef(false);
 
   const smoothingScratchLocalPointRef = React.useRef(new THREE.Vector3());
   const supportDimCameraLocalPointRef = React.useRef(new THREE.Vector3());
@@ -825,6 +841,61 @@ if (uDitherAmount > 0.0) {
     supportPlacementGuidePlaneZ,
   ]);
 
+  // Red/clear striped overlay flagging a non-manifold model (failed the
+  // manifold_csg status check). Uses the SAME world-space stripe seed and
+  // frequency as the out-of-bounds overlay (see outOfBoundsMaterial above) so
+  // the red stripes land directly on the green out-of-bounds stripes and, being
+  // translucent, blend with them where the two overlap.
+  const nonManifoldCheckerMaterial = React.useMemo(() => {
+    if (!nonManifold) return null;
+
+    return new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      clippingPlanes: planes,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+      uniforms: {
+        // Match the out-of-bounds overlay's stripe frequency so the patterns coincide.
+        uStripeFreq: { value: 0.22 },
+        uColor: { value: new THREE.Color('#ff0000') },
+        uOpacity: { value: 0.72 },
+      },
+      vertexShader: `
+        varying vec3 vWorldPos;
+        void main() {
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldPos = worldPos.xyz;
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vWorldPos;
+        uniform float uStripeFreq;
+        uniform vec3 uColor;
+        uniform float uOpacity;
+
+        void main() {
+          // Identical seed to the out-of-bounds shader; its green (colorA) band
+          // is where step(0.5, fract(seed)) == 0, so draw red there to overlap it.
+          float stripeSeed = (vWorldPos.x + vWorldPos.y + vWorldPos.z) * uStripeFreq;
+          float band = step(0.5, fract(stripeSeed));
+          if (band > 0.5) discard; // clear on the non-green bands
+          gl_FragColor = vec4(uColor, uOpacity);
+        }
+      `,
+    });
+  }, [nonManifold, planes]);
+
+  React.useEffect(() => {
+    return () => {
+      nonManifoldCheckerMaterial?.dispose();
+    };
+  }, [nonManifoldCheckerMaterial]);
+
   React.useEffect(() => {
     return () => {
       outOfBoundsMaterial?.dispose();
@@ -875,6 +946,32 @@ if (uDitherAmount > 0.0) {
 
           if (shouldSuppressModelInteraction) {
             e.stopPropagation();
+            return;
+          }
+
+          if (mode === 'prepare' && transformMode === 'organicCut' && onOrganicCutClick) {
+            // Select-only when this click is a (re)selection rather than a draw:
+            // either the model isn't active yet, OR the pointer-down landed on a
+            // not-yet-active model (captured into the suppress ref) and selection
+            // made it active mid-gesture. Without the ref, reselecting a model
+            // would also drop a stray waypoint.
+            const shouldOnlySelect = suppressNextOrganicCutClickRef.current || !isActiveModel;
+            suppressNextOrganicCutClickRef.current = false;
+            if (shouldOnlySelect) {
+              e.stopPropagation();
+              if (onActiveModelChange) {
+                onActiveModelChange(modelId, { selectionMode: 'single' });
+              }
+              return;
+            }
+
+            const firstIsGizmo = e.intersections[0]?.object.userData?.isGizmoHandle === true;
+            if (isGizmoHoverCategory || firstIsGizmo) {
+              return;
+            }
+
+            e.stopPropagation();
+            onOrganicCutClick(e as unknown as THREE.Intersection);
             return;
           }
 
@@ -1196,6 +1293,12 @@ if (uDitherAmount > 0.0) {
               suppressNextHolePunchClickRef.current = false;
             }
 
+            if (transformMode === 'organicCut' && onOrganicCutClick) {
+              suppressNextOrganicCutClickRef.current = !isActiveModel;
+            } else {
+              suppressNextOrganicCutClickRef.current = false;
+            }
+
             // If the pointer is over a gizmo handle, do not consume the event at
             // the model layer; let gizmo drag interactions win.
             // GPU pick (isGizmoHoverCategory) handles the visual-overlap case.
@@ -1340,6 +1443,20 @@ if (uDitherAmount > 0.0) {
       {supportPlacementGuideEnabled && supportPlacementGuideMaterial && (
         <mesh geometry={geometry} position={meshLocalOffset} renderOrder={4} raycast={() => null}>
           <primitive object={supportPlacementGuideMaterial} attach="material" />
+        </mesh>
+      )}
+
+      {nonManifoldCheckerMaterial && (
+        // Scope the red flag to the model section (the part) so supports are never
+        // striped. Falls back to the full geometry when there is no model/support
+        // split, in which case the whole mesh is the part.
+        <mesh
+          geometry={modelSectionGeometry ?? geometry}
+          position={meshLocalOffset}
+          renderOrder={5}
+          raycast={() => null}
+        >
+          <primitive object={nonManifoldCheckerMaterial} attach="material" />
         </mesh>
       )}
 

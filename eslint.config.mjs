@@ -49,7 +49,7 @@ const hotkeyRestrictionPlugin = {
               ) {
                 context.report({
                   node,
-                  message: "Direct window/document keydown/keyup listeners are forbidden. Use HotkeyRegistryManager or hotkeyStore. See /DragonFruit/docs/hotkeys/README.md",
+                  message: "Direct window/document keydown/keyup listeners are forbidden. Use HotkeyRegistryManager or hotkeyStore. See docs/reference/hotkeys.md",
                 });
               }
             }
@@ -64,7 +64,7 @@ const hotkeyRestrictionPlugin = {
             ) {
               context.report({
                 node,
-                message: "Direct window/document keydown/keyup property assignments are forbidden. Use HotkeyRegistryManager or hotkeyStore. See /DragonFruit/docs/hotkeys/README.md",
+                message: "Direct window/document keydown/keyup property assignments are forbidden. Use HotkeyRegistryManager or hotkeyStore. See docs/reference/hotkeys.md",
               });
             }
           }

@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+
 type Vec2 = { x: number; y: number };
 
 export type VoronoiSupportNode = {
@@ -45,10 +47,6 @@ export function getVoronoiSeedDebugMarkers(): VoronoiSeedDebugMarker[] {
 
 const EPS = 0.000001;
 
-function clamp(value: number, min: number, max: number): number {
-    return Math.min(max, Math.max(min, value));
-}
-
 function hashString(input: string): number {
     let hash = 2166136261;
     for (let i = 0; i < input.length; i += 1) {
@@ -79,7 +77,13 @@ function buildAdjacency(nodes: VoronoiSupportNode[], maxNeighborDistanceMm: numb
 
     if (nodes.length === 0) return new Map<string, string[]>();
 
-    const cellSize = Math.max(maxNeighborDistanceMm, 0.1);
+    // Math.max passes NaN through: a NaN distance used to map every node into
+    // the single "NaN:NaN" bucket while the NaN maxDistSq filter never rejected
+    // a pair, connecting the whole model into one O(N^2) clique.
+    const safeMaxNeighborDistanceMm = Number.isFinite(maxNeighborDistanceMm)
+        ? Math.max(maxNeighborDistanceMm, 0.1)
+        : 0.1;
+    const cellSize = safeMaxNeighborDistanceMm;
     const buckets = new Map<string, VoronoiSupportNode[]>();
 
     for (const node of nodes) {
@@ -91,7 +95,7 @@ function buildAdjacency(nodes: VoronoiSupportNode[], maxNeighborDistanceMm: numb
         buckets.set(key, list);
     }
 
-    const maxDistSq = maxNeighborDistanceMm * maxNeighborDistanceMm;
+    const maxDistSq = safeMaxNeighborDistanceMm * safeMaxNeighborDistanceMm;
 
     for (const node of nodes) {
         const ix = Math.floor(node.point.x / cellSize);
@@ -236,7 +240,7 @@ function buildSeeds(nodes: VoronoiSupportNode[], settings: VoronoiPartitionSetti
     }
 
     const spacing = Math.max(settings.seedSpacingMm, 0.25);
-    const jitter = clamp(settings.seedJitterMm, 0, spacing * 0.49);
+    const jitter = THREE.MathUtils.clamp(settings.seedJitterMm, 0, spacing * 0.49);
     const snapRadius = Math.max(spacing * 0.75, 0.25);
     const spatial = buildSpatialNodeBuckets(nodes, snapRadius);
     const modelSeed = hashString(nodes[0].modelId);

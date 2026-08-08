@@ -1,14 +1,16 @@
 'use client';
 
 import React from 'react';
+import { useLingui } from '@lingui/react';
 import { MATCAP_OPTIONS, MESH_SHADER_OPTIONS, type MatcapVariant, type MeshShaderType } from '@/features/shaders/mesh';
 import { HexColorPicker } from 'react-colorful';
 import { MeshShaderPreviewSlot } from '@/components/settings/meshSettings/MeshShaderPreviewSlot';
 import { MeshShaderPreviewCanvas } from '@/components/settings/meshSettings/MeshShaderPreviewCanvas';
 import { SelectionHighlightDropdown } from '@/components/controls/SelectionHighlightDropdown';
 import type { SelectionHighlightMode } from '@/components/selection';
-import { Input, Select } from '@/components/ui/primitives';
+import { Input, Select } from '@/components/atoms';
 import { Layers, MousePointer2, SlidersHorizontal } from 'lucide-react';
+import { OrganicCutColorsSection } from '@/features/organicCut';
 
 type PreviewModelConfig = {
   label: string;
@@ -92,6 +94,7 @@ export function MeshSettingsTab({
   selectedTintStrength,
   onSelectedTintStrengthChange,
 }: MeshSettingsTabProps) {
+  const { _ } = useLingui();
   const [previewModel, setPreviewModel] = React.useState<string>('knot');
   const [stlPreviewModels, setStlPreviewModels] = React.useState<PreviewModelConfig[]>([]);
   const [activeColorIndex, setActiveColorIndex] = React.useState<number>(0);
@@ -197,7 +200,7 @@ export function MeshSettingsTab({
               className="w-full !h-8"
             >
               {MESH_SHADER_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                <option key={opt.value} value={opt.value}>{_(opt.label)}</option>
               ))}
             </Select>
           </div>
@@ -326,7 +329,7 @@ export function MeshSettingsTab({
                   className="w-full !h-8"
                 >
                   {MATCAP_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    <option key={opt.value} value={opt.value}>{_(opt.label)}</option>
                   ))}
                 </Select>
               </div>
@@ -557,6 +560,8 @@ export function MeshSettingsTab({
                 </div>
               </div>
             </div>
+
+            <OrganicCutColorsSection />
 
             <div className="rounded-md border p-2.5" style={{ borderColor: 'var(--border-subtle)', background: 'var(--surface-0)' }}>
               <div className="text-xs font-semibold mb-2" style={{ color: 'var(--text-strong)' }}>Tint Intensity</div>

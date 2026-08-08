@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { execSync } from "child_process";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 
@@ -8,10 +9,32 @@ const { version: packageVersion, buildChannel: packageBuildChannel } = JSON.pars
 
 const buildChannel = (packageBuildChannel ?? 'mainline').trim().toLowerCase();
 
+// Git build fingerprint, baked in at build time so About can tell apart
+// binaries that all report the same package version. Empty when git is
+// unavailable (e.g. building from a source tarball).
+const git = (command: string): string => {
+  try {
+    return execSync(command, { cwd: __dirname, stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+  } catch {
+    return "";
+  }
+};
+const gitCommit = git("git rev-parse --short=9 HEAD");
+const gitDirty = gitCommit && git("git status --porcelain") !== "" ? "-dirty" : "";
+// Exact tag wins over branch name; detached HEAD (CI checkouts) reports "HEAD",
+// which is meaningless to users, so drop it.
+const gitBranch = git("git rev-parse --abbrev-ref HEAD").replace(/^HEAD$/, "");
+const gitRef = git("git describe --tags --exact-match") || gitBranch;
+
+// OS/arch of the build machine, same values scripts/tauri-build.mjs uses to
+// resolve the Rust target triple — lets a bug report tell binaries built for
+// different platforms apart even when version and git commit match.
+const buildOs = process.platform;
+const buildArch = process.arch;
+
 const nextConfig: NextConfig = {
-  // Turbopack (Next.js 16 default) handles `new URL("*.wasm", import.meta.url)`
-  // natively — no extra config required. The empty object here acknowledges we
-  // are intentionally using Turbopack without a custom webpack config.
   turbopack: {},
   experimental: {
     // LinguiJS macro transform via SWC — handles @lingui/core/macro imports at
@@ -21,6 +44,10 @@ const nextConfig: NextConfig = {
   env: {
     NEXT_PUBLIC_APP_VERSION: packageVersion,
     NEXT_PUBLIC_BUILD_CHANNEL: buildChannel,
+    NEXT_PUBLIC_GIT_COMMIT: gitCommit ? `${gitCommit}${gitDirty}` : "",
+    NEXT_PUBLIC_GIT_REF: gitRef,
+    NEXT_PUBLIC_BUILD_OS: buildOs,
+    NEXT_PUBLIC_BUILD_ARCH: buildArch,
   },
   reactCompiler: true,
   allowedDevOrigins: ['127.0.0.1', '::1'],

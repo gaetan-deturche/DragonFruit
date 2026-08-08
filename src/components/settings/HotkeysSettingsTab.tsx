@@ -1,9 +1,13 @@
 'use client';
 
 import React, { useMemo, useState, useEffect } from 'react';
-import { Keyboard, Lock, RotateCcw } from 'lucide-react';
+import { Keyboard, RotateCcw } from 'lucide-react';
 import { useHotkeyConfig } from '@/hotkeys/HotkeyContext';
-import { HotkeyBinding, UNIVERSAL_HOTKEYS } from '@/hotkeys/hotkeyConfig';
+import { HotkeyBinding } from '@/hotkeys/hotkeyConfig';
+import { getBindingTokens, toKeyLabel } from '@/hotkeys/hotkeyLabels';
+import { resumeHotkeyDispatch, suspendHotkeyDispatch } from '@/hotkeys/HotkeyRegistryManager';
+import { usePlatformModifier } from '@/hooks/usePlatformModifier';
+import { SECONDARY_DELETE_KEY } from '@/features/delete/useDeleteHotkey';
 
 const PINNED_SLOT_LABELS: Record<string, string> = {
   SLOT_1: 'Slot 1',
@@ -15,11 +19,11 @@ const PINNED_SLOT_LABELS: Record<string, string> = {
 };
 
 const CATEGORY_LABELS: Record<string, string> = {
+  GLOBAL: 'General',
   CAMERA: 'Camera',
   CANVAS: 'Canvas Tools',
   SUPPORTS: 'Supports',
   PRESETS: 'Presets',
-  ROTATION: 'Rotation',
 };
 
 const SECTION_GROUPS: Array<{
@@ -31,8 +35,8 @@ const SECTION_GROUPS: Array<{
   {
     id: 'global',
     title: 'Global',
-    description: 'Camera, focus, and viewport shortcuts available across all workspaces.',
-    categories: ['CAMERA'],
+    description: 'General and camera shortcuts available across all workspaces.',
+    categories: ['GLOBAL', 'CAMERA'],
   },
   {
     id: 'scene',
@@ -52,48 +56,25 @@ const SECTION_GROUPS: Array<{
     description: 'Quick-apply support preset shortcuts.',
     categories: ['PRESETS'],
   },
-  {
-    id: 'rotation',
-    title: 'Rotation Helpers',
-    description: 'Modifier-assisted snapping during rotation drag.',
-    categories: ['ROTATION'],
-  },
 ];
-
-function toModifierLabel(modifier: string): string {
-  const normalized = modifier.trim().toLowerCase();
-  if (normalized === 'ctrl') return 'Ctrl';
-  if (normalized === 'shift') return 'Shift';
-  if (normalized === 'alt') return 'Alt';
-  if (normalized === 'meta') return 'Meta';
-  return modifier;
-}
-
-function toKeyLabel(key: string): string {
-  if (key.length === 1) return key.toUpperCase();
-  if (key.toLowerCase() === ' ') return 'Space';
-  return key;
-}
 
 function normalizeRecordedKey(rawKey: string): string {
   if (rawKey === ' ') return 'Space';
   return rawKey.length === 1 ? rawKey.toLowerCase() : rawKey;
 }
 
-function getBindingTokens(binding: HotkeyBinding): string[] {
-  const modifierTokens = binding.modifier
-    ? binding.modifier.split('+').map(toModifierLabel)
-    : [];
-  return [...modifierTokens, toKeyLabel(binding.key)];
-}
 
 export function HotkeysSettingsTab() {
-  const { config, updateHotkey, resetToDefaults } = useHotkeyConfig();
+  const { config, updateHotkey, resetCategories } = useHotkeyConfig();
   const [recordingKey, setRecordingKey] = useState<{ category: string, action: string } | null>(null);
 
   // Effect to handle key recording
   useEffect(() => {
     if (!recordingKey) return;
+
+    // Silence the app while recording: otherwise the key being captured also reaches
+    // its normal handlers — Escape would close Settings instead of cancelling here.
+    suspendHotkeyDispatch();
 
     let pressedNonModifier = false;
 
@@ -172,6 +153,7 @@ export function HotkeysSettingsTab() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown, true);
       window.removeEventListener('keyup', handleKeyUp, true);
+      resumeHotkeyDispatch();
     };
   }, [recordingKey, config, updateHotkey]);
 
@@ -210,48 +192,16 @@ export function HotkeysSettingsTab() {
     }).filter((section) => section.categories.some((category) => category.entries.length > 0));
   }, [config]);
 
-  const universalRows = useMemo(() => {
-    return Object.entries(UNIVERSAL_HOTKEYS).map(([action, binding]) => {
-      if ('keys' in binding) {
-        return {
-          action,
-          label: binding.description,
-          tokenGroups: binding.keys.map((key) => [toKeyLabel(key)]),
-        };
-      }
-
-      const modifierTokens = binding.modifier
-        ? binding.modifier.split('+').map(toModifierLabel)
-        : [];
-
-      return {
-        action,
-        label: binding.description,
-        tokenGroups: [[...modifierTokens, toKeyLabel(binding.key)]],
-      };
-    });
-  }, []);
-
-  const rotationSection = useMemo(
-    () => configurableSections.find((section) => section.id === 'rotation') ?? null,
-    [configurableSections],
-  );
-
-  const nonRotationSections = useMemo(
-    () => configurableSections.filter((section) => section.id !== 'rotation'),
-    [configurableSections],
-  );
-
   const sectionRows = useMemo(() => {
-    const rows: Array<[typeof nonRotationSections[number] | null, typeof nonRotationSections[number] | null]> = [];
-    for (let index = 0; index < nonRotationSections.length; index += 2) {
+    const rows: Array<[typeof configurableSections[number] | null, typeof configurableSections[number] | null]> = [];
+    for (let index = 0; index < configurableSections.length; index += 2) {
       rows.push([
-        nonRotationSections[index] ?? null,
-        nonRotationSections[index + 1] ?? null,
+        configurableSections[index] ?? null,
+        configurableSections[index + 1] ?? null,
       ]);
     }
     return rows;
-  }, [nonRotationSections]);
+  }, [configurableSections]);
 
   const renderConfigSection = (section: {
     id: string;
@@ -293,6 +243,21 @@ export function HotkeysSettingsTab() {
             {section.description}
           </p>
         </div>
+
+        <button
+          type="button"
+          onClick={() => resetCategories(section.categories.map((category) => category.category))}
+          title="Reset section to default shortcuts"
+          aria-label={`Reset ${section.title} section to default shortcuts`}
+          className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border transition-colors hover:brightness-125"
+          style={{
+            borderColor: 'color-mix(in srgb, var(--success), transparent 55%)',
+            background: 'color-mix(in srgb, var(--success), transparent 88%)',
+            color: 'var(--success)',
+          }}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+        </button>
       </div>
 
       <div className="mt-2 space-y-2">
@@ -304,16 +269,20 @@ export function HotkeysSettingsTab() {
               </div>
             )}
 
-            {category.entries.map((entry) => (
-              <HotkeyRow
-                key={`${category.category}-${entry.action}`}
-                label={entry.label}
-                binding={entry.binding}
-                isRecording={recordingKey?.category === category.category && recordingKey?.action === entry.action}
-                onRecord={() => setRecordingKey({ category: category.category, action: entry.action })}
-                onCancel={() => setRecordingKey(null)}
-              />
-            ))}
+            {category.entries.map((entry) => {
+              const isDeleteAction = category.category === 'GLOBAL' && entry.action === 'DELETE';
+              return (
+                <HotkeyRow
+                  key={`${category.category}-${entry.action}`}
+                  label={entry.label}
+                  binding={entry.binding}
+                  isRecording={recordingKey?.category === category.category && recordingKey?.action === entry.action}
+                  onRecord={() => setRecordingKey({ category: category.category, action: entry.action })}
+                  onCancel={() => setRecordingKey(null)}
+                  secondaryToken={isDeleteAction ? toKeyLabel(SECONDARY_DELETE_KEY) : undefined}
+                />
+              );
+            })}
           </div>
         ))}
       </div>
@@ -323,10 +292,6 @@ export function HotkeysSettingsTab() {
 
   return (
     <div className="h-full min-h-0 flex flex-col gap-2">
-      <div className="px-0.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-        Click a shortcut chip to record a new key combo. Press <strong>Esc</strong> while recording to cancel.
-      </div>
-
       <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1">
         <div className="space-y-2.5">
           {sectionRows.map(([leftSection, rightSection], index) => (
@@ -335,88 +300,7 @@ export function HotkeysSettingsTab() {
               {rightSection ? renderConfigSection(rightSection) : <div />}
             </div>
           ))}
-
-          <div className="grid gap-2.5 lg:grid-cols-2">
-            {rotationSection ? renderConfigSection(rotationSection) : <div />}
-
-            <section
-              className="rounded-lg border p-2.5 h-full"
-              style={{
-                borderColor: 'var(--border-subtle)',
-                background: 'var(--surface-1)',
-              }}
-            >
-              <div className="flex items-start gap-2">
-                <span
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md border shrink-0"
-                  style={{
-                    borderColor: 'var(--border-subtle)',
-                    background: 'color-mix(in srgb, var(--surface-2), transparent 8%)',
-                  }}
-                >
-                  <Lock className="h-4 w-4" style={{ color: 'var(--text-muted)' }} />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <h4 className="text-sm font-semibold" style={{ color: 'var(--text-strong)' }}>
-                    System Standard
-                  </h4>
-                  <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    Fixed shortcuts shared across all configurations.
-                  </p>
-                </div>
-              </div>
-
-              <div className="mt-1.5 space-y-1">
-                {universalRows.map((row) => (
-                  <div
-                    key={row.action}
-                    className="flex items-center justify-between gap-2 rounded-md border px-2 py-1.5"
-                    style={{
-                      borderColor: 'var(--border-subtle)',
-                      background: 'color-mix(in srgb, var(--surface-2), transparent 8%)',
-                    }}
-                    title="System standard shortcut"
-                  >
-                    <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                      {row.label}
-                    </span>
-                    <div className="flex items-center gap-1.5">
-                      {row.tokenGroups.map((group, groupIndex) => (
-                        <React.Fragment key={`${row.action}-${groupIndex}`}>
-                          {group.map((token) => (
-                            <KbdToken key={`${row.action}-${groupIndex}-${token}`}>{token}</KbdToken>
-                          ))}
-                          {groupIndex < row.tokenGroups.length - 1 && (
-                            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>or</span>
-                          )}
-                        </React.Fragment>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </div>
         </div>
-      </div>
-
-      <div
-        className="mt-auto flex items-center justify-end border-t pt-2"
-        style={{ borderColor: 'var(--border-subtle)' }}
-      >
-        <button
-          type="button"
-          onClick={resetToDefaults}
-          className="ui-button ui-button-secondary !h-8 !px-3 !py-0 text-xs inline-flex items-center gap-1 rounded-md"
-          style={{
-            color: 'var(--accent-secondary-action-color)',
-            borderColor: 'var(--accent-secondary-action-border)',
-            background: 'var(--accent-secondary-action-bg-92)',
-          }}
-        >
-          <RotateCcw className="w-3.5 h-3.5" />
-          Reset to Defaults
-        </button>
       </div>
 
       {/* Recording Overlay/Hint */}
@@ -463,69 +347,83 @@ export function HotkeysSettingsTab() {
   );
 }
 
-function HotkeyRow({ label, binding, isRecording, onRecord, onCancel }: {
+function HotkeyRow({ label, binding, isRecording, onRecord, onCancel, secondaryToken }: {
   label: string,
   binding: HotkeyBinding,
   isRecording: boolean,
   onRecord: () => void,
-  onCancel: () => void
+  onCancel: () => void,
+  secondaryToken?: string,
 }) {
-  const tokens = getBindingTokens(binding);
+  const primaryModifierLabel = usePlatformModifier();
+  const tokens = getBindingTokens(binding, primaryModifierLabel);
 
   return (
     <div
-      className="flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 transition-colors"
-      style={{
-        borderColor: 'var(--border-subtle)',
-        background: 'color-mix(in srgb, var(--surface-2), transparent 10%)',
-      }}
+      className="flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1.5 transition-colors"
+      style={isRecording
+        ? {
+          borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 35%)',
+          background: 'color-mix(in srgb, var(--accent), var(--surface-1) 84%)',
+          color: 'var(--text-strong)',
+        }
+        : {
+          borderColor: 'var(--border-subtle)',
+          background: 'color-mix(in srgb, var(--surface-2), transparent 10%)',
+          color: 'var(--text-strong)',
+        }}
     >
       <span className="min-w-0 text-[11px] truncate" style={{ color: 'var(--text-strong)' }} title={label}>
         {label}
       </span>
 
-      <button
-        type="button"
-        onClick={(event) => {
-          event.stopPropagation();
-          if (isRecording) {
-            onCancel();
-          } else {
-            onRecord();
-          }
-        }}
-        className="inline-flex min-w-[108px] items-center justify-center gap-1 rounded-md border px-1.5 py-1 text-[10px] transition-all"
-        style={isRecording
-          ? {
-            borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 35%)',
-            background: 'color-mix(in srgb, var(--accent), var(--surface-1) 84%)',
-            color: 'var(--text-strong)',
-          }
-          : {
-            borderColor: 'var(--border-subtle)',
-            background: 'var(--surface-1)',
-            color: 'var(--text-muted)',
+      <span className="inline-flex items-center justify-end gap-1">
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (isRecording) {
+              onCancel();
+            } else {
+              onRecord();
+            }
           }}
-      >
-        {isRecording ? (
-          <span className="font-medium">Press keys…</span>
-        ) : (
-          tokens.map((token) => <KbdToken key={`${binding.description}-${token}`}>{token}</KbdToken>)
+          title={isRecording ? 'Cancel' : 'Click to change'}
+          className="inline-flex min-w-[92px] items-center justify-center gap-1 rounded-md px-1 py-0.5 transition-colors hover:brightness-110"
+        >
+          {isRecording ? (
+            <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>Press keys…</span>
+          ) : (
+            tokens.map((token) => <KbdToken key={`${binding.description}-${token}`}>{token}</KbdToken>)
+          )}
+        </button>
+
+        {!isRecording && secondaryToken && (
+          <span className="inline-flex items-center gap-1" title="Always available">
+            <span className="text-[10px]" style={{ color: 'var(--text-muted)' }} aria-hidden>/</span>
+            <KbdToken muted>{secondaryToken}</KbdToken>
+          </span>
         )}
-      </button>
+      </span>
     </div>
   );
 }
 
-function KbdToken({ children }: { children: React.ReactNode }) {
+function KbdToken({ children, muted = false }: { children: React.ReactNode, muted?: boolean }) {
   return (
     <kbd
-      className="inline-flex min-w-[20px] items-center justify-center rounded border px-1 py-0.5 font-mono text-[10px]"
-      style={{
-        borderColor: 'var(--border-subtle)',
-        background: 'color-mix(in srgb, var(--surface-2), transparent 4%)',
-        color: 'var(--text-strong)',
-      }}
+      className="inline-flex min-w-[20px] items-center justify-center rounded border px-1 py-1 font-mono text-[10px]"
+      style={muted
+        ? {
+          borderColor: 'var(--border-subtle)',
+          background: 'color-mix(in srgb, var(--surface-2), transparent 40%)',
+          color: 'var(--text-muted)',
+        }
+        : {
+          borderColor: 'color-mix(in srgb, var(--accent), var(--border-subtle) 50%)',
+          background: 'color-mix(in srgb, var(--surface-2), transparent 4%)',
+          color: 'var(--text-strong)',
+        }}
     >
       {children}
     </kbd>

@@ -6,7 +6,11 @@
 
 pub mod analysis;
 pub mod arrangement;
-pub mod core;
+/// Shared mesh primitives now live in the `dragonfruit-mesh-core` crate. This
+/// re-export keeps the historical `crate::core::{mesh,bvh,halfedge}` paths
+/// working for the rest of this crate (and any external `mesh_repair::core::*`
+/// users) without rewriting every import.
+pub use dragonfruit_mesh_core as core;
 pub mod hollowing;
 pub mod io;
 pub mod repair;

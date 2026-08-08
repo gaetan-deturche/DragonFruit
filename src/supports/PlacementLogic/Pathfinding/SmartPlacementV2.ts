@@ -23,7 +23,8 @@ import {
 import { getSettings } from '../../Settings';
 import { gridNodeKeyFromXY, gridSnappedXYFromKey } from '../Grid/gridMath';
 import { buildNearestCandidateNodeKeys } from '../Grid/nearestCandidateNodeKeys';
-import { SDFCache } from './SDFCache';
+import { onSDFMatrixDrift, SDFCache } from './SDFCache';
+import { encodeSupportSettingsHex } from '../../Settings/supportSettingsCodec';
 import { gridAStar, type GridAStarDebugSnapshot, type WarmStartState } from './GridAStar';
 import { solvePotentialField } from './PotentialFieldSolver';
 import { solveDeterministicFieldPath } from './FieldDeterministicSolver';
@@ -37,9 +38,11 @@ import {
     type SupportPathfindingDebugOutcome,
 } from './pathfindingDebugState';
 import { perfMark, perfMeasureWithSpike } from './pathfindingPerf';
+import { normalizeVectorOrFallback } from '../ConeAxisPolicy';
 import {
     distanceXY,
     distance3D,
+    firstSegmentSatisfiesSocketElbowMaxAngle,
     segmentAngleFromVerticalDeg,
     segmentSatisfiesLengthAwareMaxAngleFromVertical,
     segmentSatisfiesMaxAngleFromVertical,
@@ -50,6 +53,10 @@ import {
 export interface SmartPlacementV2Input extends TrunkPlacementInput {
     mesh: THREE.Mesh;
     modelId: string;
+    /** Actual (auto-sized) shaft diameter this support will be RENDERED at, in mm.
+     *  Collision/clearance must use this — not the nominal settings diameter —
+     *  or an auto-sized fat trunk gets validated thin and penetrates the model. */
+    shaftDiameterMm?: number;
 }
 
 export interface SmartPlacementV2Context {
@@ -454,14 +461,6 @@ function segmentCacheKey(start: Vec3, end: Vec3): string {
     return startKey <= endKey ? `${startKey}->${endKey}` : `${endKey}->${startKey}`;
 }
 
-function normalizeVectorOrFallback(vector: THREE.Vector3, fallback: THREE.Vector3): THREE.Vector3 {
-    if (vector.lengthSq() < 0.000001) {
-        return fallback.clone().normalize();
-    }
-
-    return vector.clone().normalize();
-}
-
 function getContactConeRescuePenaltyMetrics(args: {
     socketPos: Vec3;
     coneScoring: ContactConeRescueScoringInput;
@@ -645,7 +644,14 @@ function contactConeBlocked(args: {
         const py = start.y + dirY * t;
         const pz = start.z + dirZ * t;
         const radius = THREE.MathUtils.lerp(cone.coneStartRadiusMm, cone.coneEndRadiusMm, t) + CONTACT_CONE_COLLISION_SAFETY_MM;
-        if (args.sdf.isBlocked(px, py, pz, radius)) {
+        // Exact-point signed distance, NOT the quantized grid: the gate's
+        // safety margin (0.05mm) is far below the grid's cell-center
+        // substitution error (~cellSize·√3/2), which made nearby geometry the
+        // cone actually clears read as intersecting (user-confirmed via the
+        // 0.25mm-grid experiment, 2026-07-10). ~25 memoized samples per
+        // socket keep this cheap. Unbounded query so interior samples still
+        // sign negative (cone through solid must stay detected).
+        if (args.sdf.exactSignedDistanceAt(px, py, pz) < radius) {
             return true;
         }
     }
@@ -683,6 +689,56 @@ function createContactConeBlockedMemo(args: {
         cache.set(key, blocked);
         return blocked;
     };
+}
+
+/**
+ * Lateral ring sample for a cone-clear socket. The gradient march in
+ * {@link findContactConeClearSocketSeed} descends along the SDF gradient, which
+ * for a contact UNDER an overhang stays trapped beneath the model (the nearest
+ * surface is the contact face itself). This instead samples socket directions
+ * spread around the surface normal — azimuths × polar angles up to the disk
+ * angle limit — and returns the first clear one (smallest polar angle first, so
+ * the contact stays as square to the surface as possible). That gives the A* a
+ * clear seed it can route laterally out and down to the build plate.
+ */
+function sampleLateralConeSeed(args: {
+    tip: Vec3;
+    normal: THREE.Vector3;
+    L_nominal: number;
+    L_max: number;
+    maxRadius: number;
+    contactConeBlockedAt: ContactConeBlockedAt;
+}): Vec3 | null {
+    const N = args.normal;
+    const T = args.tip;
+    // Orthonormal tangent basis perpendicular to N.
+    const t1 = Math.abs(N.x) > 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    t1.sub(N.clone().multiplyScalar(t1.dot(N))).normalize();
+    const t2 = new THREE.Vector3().crossVectors(N, t1).normalize();
+
+    const phisDeg = [25, 40, 52, 63, 72]; // polar angle from N, below the 78° disk limit
+    const azimuthCount = 12;
+    const lengths = [args.L_nominal, (args.L_nominal + args.L_max) / 2, args.L_max];
+
+    for (const L of lengths) {
+        for (const phiDeg of phisDeg) {
+            const phi = (phiDeg * Math.PI) / 180;
+            const cosP = Math.cos(phi);
+            const sinP = Math.sin(phi);
+            for (let a = 0; a < azimuthCount; a++) {
+                const psi = (a / azimuthCount) * Math.PI * 2;
+                const dx = N.x * cosP + (t1.x * Math.cos(psi) + t2.x * Math.sin(psi)) * sinP;
+                const dy = N.y * cosP + (t1.y * Math.cos(psi) + t2.y * Math.sin(psi)) * sinP;
+                const dz = N.z * cosP + (t1.z * Math.cos(psi) + t2.z * Math.sin(psi)) * sinP;
+                const S: Vec3 = { x: T.x + dx * L, y: T.y + dy * L, z: T.z + dz * L };
+                if (Math.hypot(S.x - T.x, S.y - T.y) > args.maxRadius) continue;
+                if (!args.contactConeBlockedAt(S)) {
+                    return S; // first clear = smallest polar angle at this length
+                }
+            }
+        }
+    }
+    return null;
 }
 
 function findContactConeClearSocketSeed(args: {
@@ -782,8 +838,21 @@ function findContactConeClearSocketSeed(args: {
         }
     }
 
+    // If the gradient march is still blocked (typical for contacts trapped
+    // under an overhang), fall back to a lateral ring sample around the normal.
     if (args.contactConeBlockedAt(currentPos)) {
-        return null; // still blocked after gradient march
+        const lateral = sampleLateralConeSeed({
+            tip: T,
+            normal: N,
+            L_nominal,
+            L_max,
+            maxRadius,
+            contactConeBlockedAt: args.contactConeBlockedAt,
+        });
+        if (!lateral) {
+            return null; // still blocked after gradient march + ring sample
+        }
+        currentPos = lateral;
     }
 
     const metrics = getContactConeRescuePenaltyMetrics({
@@ -982,7 +1051,10 @@ export function findMixedSocketRescueCandidate(args: {
                     if (segmentBlockedBetween(start, end)) {
                         return false;
                     }
-                    if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(start, end, args.maxAngleFromVerticalDeg)) {
+                    const rescueSegmentAngleOk = i === 0
+                        ? firstSegmentSatisfiesSocketElbowMaxAngle(start, end, args.maxAngleFromVerticalDeg)
+                        : segmentSatisfiesLengthAwareMaxAngleFromVertical(start, end, args.maxAngleFromVerticalDeg);
+                    if (!rescueSegmentAngleOk) {
                         return false;
                     }
                 }
@@ -1345,37 +1417,20 @@ export function isResolvedChainReplacementBetter(
     candidate: ResolvedChainMetrics,
     current: ResolvedChainMetrics,
 ): boolean {
-    const eps = 0.000001;
+    // Weighted scoring: lower = better.
+    // Joint count gets an exponential penalty so the pathfinder strongly
+    // prefers fewer joints — each additional joint roughly doubles the
+    // penalty, making 3+ joint "maze" paths extremely expensive.
+    const JOINT_BASE = 2.5;
+    const JOINT_WEIGHT = 20;
+    const score = (m: ResolvedChainMetrics) =>
+        m.firstSegmentAngleFromVerticalDeg * 3
+        + m.firstSegmentLateral * 3
+        + Math.pow(JOINT_BASE, m.jointCount) * JOINT_WEIGHT
+        + m.totalLateral * 0.5
+        + m.totalLength * 0.2;
 
-    if (candidate.firstSegmentAngleFromVerticalDeg < current.firstSegmentAngleFromVerticalDeg - eps) {
-        return true;
-    }
-    if (candidate.firstSegmentAngleFromVerticalDeg > current.firstSegmentAngleFromVerticalDeg + eps) {
-        return false;
-    }
-
-    if (candidate.firstSegmentLateral < current.firstSegmentLateral - eps) {
-        return true;
-    }
-    if (candidate.firstSegmentLateral > current.firstSegmentLateral + eps) {
-        return false;
-    }
-
-    if (candidate.totalLateral < current.totalLateral - eps) {
-        return true;
-    }
-    if (candidate.totalLateral > current.totalLateral + eps) {
-        return false;
-    }
-
-    if (candidate.totalLength < current.totalLength - eps) {
-        return true;
-    }
-    if (candidate.totalLength > current.totalLength + eps) {
-        return false;
-    }
-
-    return candidate.jointCount < current.jointCount;
+    return score(candidate) < score(current) - 0.0001;
 }
 
 // ---------- Roots cone volume check ----------
@@ -1634,12 +1689,21 @@ const sdfCachePool = new Map<string, SDFCache>();
 /** Dedupes explicit precomputation requests for the same mesh. */
 const precomputationRequests = new Map<string, Promise<number>>();
 
-export function getOrCreateSDFCache(mesh: THREE.Mesh, cellSize?: number): SDFCache {
+// Single source of truth for the lazy SDF grid resolution. The pool is
+// first-caller-wins, so per-caller cellSize arguments created a resolution
+// race (a mesh's accuracy depended on which subsystem touched it first) —
+// the parameter was removed for that reason. Gates whose margins are finer
+// than the cell-center substitution error (~cellSize·√3/2) must use
+// SDFCache.exactSignedDistanceAt instead of relying on grid resolution;
+// the contact-cone gate does.
+const SDF_DEFAULT_CELL_SIZE_MM = 0.5;
+
+export function getOrCreateSDFCache(mesh: THREE.Mesh): SDFCache {
     const key = mesh.uuid;
     const existing = sdfCachePool.get(key);
     if (existing) return existing;
 
-    const cache = new SDFCache(mesh, { cellSize: cellSize ?? 0.5 });
+    const cache = new SDFCache(mesh, { cellSize: SDF_DEFAULT_CELL_SIZE_MM });
     sdfCachePool.set(key, cache);
     return cache;
 }
@@ -1780,6 +1844,19 @@ const stagnationCache = new Map<string, Vec3[]>();
  */
 const previewExhaustedCache = new Map<string, Vec3[]>();
 
+// Settings epoch for the failure caches: entries recorded under different
+// support settings (clearance, tip profile) are not comparable.
+let lastPlacementSettingsHex: string | null = null;
+
+// Stagnation / preview-exhausted points are recorded in WORLD space: when a
+// model's matrix drifts (Z-lift, rotation, scale, XY translate) the old points
+// hang where the model used to be and fast-fail perfectly valid placements.
+// The pooled SDF detects drift on refresh — clear alongside its distances.
+onSDFMatrixDrift((meshUuid) => {
+    stagnationCache.delete(meshUuid);
+    previewExhaustedCache.delete(meshUuid);
+});
+
 function isNearSpatialPoint(cache: Map<string, Vec3[]>, meshUuid: string, pos: Vec3, radiusSq: number): boolean {
     const points = cache.get(meshUuid);
     if (!points || points.length === 0) return false;
@@ -1827,7 +1904,11 @@ export function calculateSmartPlacementV2(
     const { mesh, modelId } = input;
     const settings = getSettings();
     const routingAlgorithm = 'potential'; // permanent default
-    const shaftRadius = settings.shaft.diameterMm / 2;
+    // Use the ACTUAL rendered shaft diameter (auto-sized override) so collision
+    // clearance matches the geometry that gets drawn. Falling back to the nominal
+    // settings diameter would validate a fat auto-sized trunk as if it were thin,
+    // letting it penetrate the model.
+    const shaftRadius = (input.shaftDiameterMm ?? settings.shaft.diameterMm) / 2;
     const debugEnabled = getSupportPathfindingDebugEnabled();
     const debugTuningEnabled = getSupportPathfindingDebugTuningEnabled();
     const debugAutoTuneProfile = combineDebugAutoTuneProfiles(
@@ -1914,9 +1995,20 @@ export function calculateSmartPlacementV2(
     }
 
     // 2. Get or create SDF cache; refresh matrix so stale cache from a previous
-    //    model position does not produce wrong distances.
+    //    model position does not produce wrong distances (drift also clears
+    //    the world-space failure caches via the onSDFMatrixDrift listener).
     const sdf = context?.sdfCache ?? getOrCreateSDFCache(mesh);
     sdf.refreshMatrix();
+
+    // Support-relevant settings changes (shaft diameter → clearance, tip
+    // profile, grid) also invalidate recorded failure points: they were
+    // computed under the old constraints.
+    const placementSettingsHex = encodeSupportSettingsHex(settings);
+    if (placementSettingsHex !== lastPlacementSettingsHex) {
+        stagnationCache.clear();
+        previewExhaustedCache.clear();
+        lastPlacementSettingsHex = placementSettingsHex;
+    }
 
     // 3. Quick check: is the straight-down path clear AND do the roots fit at the base?
     const rootTopZ = input.rootsTopZ;
@@ -2494,11 +2586,19 @@ export function calculateSmartPlacementV2(
     const fieldDeterministic = routingAlgorithm === 'potential'; // always true
 
     if (fieldDeterministic) {
+        // devTools values only apply when dev tools are enabled (mirrors the
+        // potential-field branch below). In particular maxLateralMm must
+        // otherwise follow the computed search envelope: a stale devTools cap
+        // (default 30mm) silently truncated every march and manufactured
+        // stagnation-cache entries at positions a full-envelope march routes.
         const detResult = solveDeterministicFieldPath(sdf, socketPos, rootTopZ, {
             clearanceMm: clearance,
-            marginMm: settings.devTools.marginMm,
-            stepMm: settings.devTools.stepMm,
-            maxLateralMm: settings.devTools.maxLateralMm,
+            marginMm: settings.devToolsEnabled && settings.devTools ? settings.devTools.marginMm : 2.5,
+            stepMm: settings.devToolsEnabled && settings.devTools ? settings.devTools.stepMm : 1.0,
+            maxLateralMm: settings.devToolsEnabled && settings.devTools ? settings.devTools.maxLateralMm : maxTotalLateralMm,
+            // The final chain validator enforces this angle on the resolved
+            // route; the march must not emit chords the validator rejects.
+            maxAngleFromVerticalDeg: maxSegmentAngleFromVerticalDeg,
         });
         result = {
             path: detResult.path,
@@ -2807,8 +2907,13 @@ export function calculateSmartPlacementV2(
                 // Run when: (a) zero-joint sweep failed and we still have 2+ joints, OR
                 // (b) zero-joint sweep found a path but the base is laterally far from
                 // the socket — a one-joint path with a closer base may be better.
+                // (c) single joint is too shallow — try to find a deeper alternative.
                 const _zeroLateral = distanceXY(socketPos, { x: _finalBase.basePos.x, y: _finalBase.basePos.y, z: socketPos.z });
-                const _needOneJointSearch = _finalJoints.length >= 2 || (_finalJoints.length === 0 && _zeroLateral > 1.5);
+                const _firstJointDrop = _finalJoints.length >= 1 ? (socketPos.z - _finalJoints[0].z) : Infinity;
+                const _oneJointMinFirstDropMm = 4.0;
+                const _needOneJointSearch = _finalJoints.length >= 2
+                    || (_finalJoints.length === 0 && _zeroLateral > 1.5)
+                    || (_finalJoints.length === 1 && _firstJointDrop < _oneJointMinFirstDropMm);
                 if (!isPreview && _needOneJointSearch) {
                     const _baseCandidates: Array<{ x: number; y: number }> = [];
                     _baseCandidates.push({ x: _finalBase.basePos.x, y: _finalBase.basePos.y });
@@ -2867,8 +2972,7 @@ export function calculateSmartPlacementV2(
                     let _skipSeg1 = 0;
                     let _skipSeg2 = 0;
                     let _skipAngle = 0;
-                    const _oneJointMinFirstDropMm = 4.0;
-                    const _oneJointEarlyBendPenaltyPerMm = 12.0;
+                    const _oneJointEarlyBendPenaltyPerMm = 30.0;
 
                     const _rootsFitCache = new Map<string, boolean>();
                     const _rootsFitAt = (x: number, y: number): boolean => {
@@ -3106,6 +3210,85 @@ export function calculateSmartPlacementV2(
                 }
             }
 
+            // Deepen shallow single joints: when the final result has exactly one
+            // joint with very little Z drop (< 4mm), try to push it down so the
+            // first segment is more vertical.  A near-horizontal kick right at the
+            // socket is hard to print; a deeper joint produces a gentler angle.
+            // Search includes small XY perturbations at each Z step in case the
+            // exact-same-XY path is blocked by thin geometry.
+            const _deepeningMinFirstDropMm = 4.0;
+            if (_finalJoints.length === 1 && (socketPos.z - _finalJoints[0].z) < _deepeningMinFirstDropMm) {
+                const _jOrig = _finalJoints[0];
+                const _crt: Vec3 = { x: _finalBase.basePos.x, y: _finalBase.basePos.y, z: rootTopZ };
+                const _deepenStep = 0.5;
+                let _bestZ = _jOrig.z;
+                // XY perturbations to try when exact-same-XY is blocked
+                const _xyOffsets = [0, 0.3, 0.6];
+                for (let _zTry = _jOrig.z - _deepenStep; _zTry > rootTopZ + 1; _zTry -= _deepenStep) {
+                    let _foundAtZ = false;
+                    for (const _offR of _xyOffsets) {
+                        const _angles = _offR === 0 ? [0] : [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI, 5 * Math.PI / 4, 3 * Math.PI / 2, 7 * Math.PI / 4];
+                        for (const _ang of _angles) {
+                            const _jx = _jOrig.x + Math.cos(_ang) * _offR;
+                            const _jy = _jOrig.y + Math.sin(_ang) * _offR;
+                            const _jTry: Vec3 = { x: _jx, y: _jy, z: _zTry };
+                            // socket → deepened joint
+                            if (segmentBlockedBetween(socketPos, _jTry)) continue;
+                            if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(socketPos, _jTry, maxSegmentAngleFromVerticalDeg)) continue;
+                            // deepened joint → rootTop
+                            const _crtJ: Vec3 = { x: _jx, y: _jy, z: rootTopZ };
+                            if (!rootsDiskBlockedAt(_jx, _jy) && !segmentBlockedBetween(_jTry, _crtJ)
+                                && segmentSatisfiesLengthAwareMaxAngleFromVertical(_jTry, _crtJ, maxSegmentAngleFromVerticalDeg)) {
+                                _bestZ = _zTry;
+                                // Update base XY too so seg2 stays straight-down
+                                _finalBase = {
+                                    basePos: { x: _jx, y: _jy, z: 0 },
+                                    rootTopTarget: _crtJ,
+                                    snapDistance: 0,
+                                    nodeKey: null,
+                                };
+                                _finalRootTop = _crtJ;
+                                _foundAtZ = true;
+                                break;
+                            }
+                        }
+                        if (_foundAtZ) break;
+                    }
+                    if (!_foundAtZ) break; // this Z has no viable XY; deeper won't help
+                }
+                if (_bestZ < _jOrig.z) {
+                    _finalJoints = [{ x: _finalBase.basePos.x, y: _finalBase.basePos.y, z: _bestZ }];
+                }
+            }
+
+            // Terminal joint cleanup: when the last joint sits directly above the
+            // base (same XY within 0.6mm), try removing it — it's often just an
+            // A* grid artifact.  Use relaxed clearance on retry since base-adjacent
+            // segments tolerate closer model proximity than socket-adjacent ones.
+            if (_finalJoints.length >= 1) {
+                const _tlj = _finalJoints[_finalJoints.length - 1];
+                const _tldxy = distanceXY(_tlj, _finalBase.rootTopTarget);
+                if (_tldxy < 0.6) {
+                    const _tprev = _finalJoints.length >= 2
+                        ? _finalJoints[_finalJoints.length - 2]
+                        : socketPos;
+                    const _tdirect = _finalBase.rootTopTarget;
+                    if (segmentSatisfiesLengthAwareMaxAngleFromVertical(_tprev, _tdirect, maxSegmentAngleFromVerticalDeg)) {
+                        let _tcan = !segmentBlockedBetween(_tprev, _tdirect);
+                        if (!_tcan) {
+                            _tcan = !sdf.segmentBlocked(
+                                _tprev.x, _tprev.y, _tprev.z,
+                                _tdirect.x, _tdirect.y, _tdirect.z,
+                                clearance * 0.4,
+                            );
+                        }
+                        if (_tcan) {
+                            _finalJoints = _finalJoints.slice(0, -1);
+                        }
+                    }
+                }
+            }
+
             // Quality gate: if still 2+ joints and they're all crammed into a
             // tight Z band (< MIN_ROUTING_Z_SPAN_MM), the path is squeezing
             // through a model crack — reject it rather than embed the support.
@@ -3137,6 +3320,28 @@ export function calculateSmartPlacementV2(
                 }
             }
             if (_angleOk) {
+                // Quality gate: reject excessively complex routed paths.
+                // A "maze" of 3+ joints or a multi-joint path starting with a
+                // near-horizontal kick are fragile to print.  Fall back to a
+                // rescue placement (different socket or straight support) when
+                // one is available.
+                const _firstDrop = _finalJoints.length > 0 ? (socketPos.z - _finalJoints[0].z) : Infinity;
+                const _isExcessive =
+                    _finalJoints.length >= 3
+                    || (_finalJoints.length >= 2 && _firstDrop < 2.0)
+                    || (_finalJoints.length >= 1 && _firstDrop < 0.5);
+                if (!isPreview && _isExcessive) {
+                    const _rescue = buildStraightRescueFallback();
+                    if (_rescue) {
+                        if (!isPreview) {
+                            console.log(
+                                `[SmartPlacementV2] WIDE-STEP rejected — excessive complexity (joints=${_finalJoints.length} firstDrop=${_firstDrop.toFixed(2)}mm), falling back to rescue`,
+                            );
+                        }
+                        publishPathfindingDebugSnapshot();
+                        return _rescue;
+                    }
+                }
                 if (!isPreview) {
                     const _wideChain = [socketPos, ..._finalJoints, _finalRootTop];
                     const _wideSegs = _wideChain.slice(0,-1).map((p,i) => {
@@ -3496,9 +3701,10 @@ export function calculateSmartPlacementV2(
 
                 if (rootsDiskBlockedAt(oc.baseXY.x, oc.baseXY.y)) continue;
 
-                // Check both segments: socket→joint and joint→rootTop
+                // Check both segments: socket→joint and joint→rootTop.
+                // socket→joint is a first segment: the socket-elbow rule applies.
                 const seg1Ok = !segmentBlockedBetween(socketPos, oc.joint)
-                    && segmentSatisfiesLengthAwareMaxAngleFromVertical(socketPos, oc.joint, maxSegmentAngleFromVerticalDeg);
+                    && firstSegmentSatisfiesSocketElbowMaxAngle(socketPos, oc.joint, maxSegmentAngleFromVerticalDeg);
                 if (!seg1Ok) continue;
 
                 const seg2Ok = !segmentBlockedBetween(oc.joint, candRootTop)
@@ -3506,7 +3712,33 @@ export function calculateSmartPlacementV2(
                 if (!seg2Ok) continue;
                 if (!currentChainIsBetterThan([oc.joint], candRootTop)) continue;
 
-                finalJoints = [oc.joint];
+                // Deepen shallow joints: walk the joint down at the same XY
+                // so the first segment is more vertical and printable.
+                let _fineJoint = oc.joint;
+                {
+                    const _fineMinFirstDropMm = 4.0;
+                    const _fineFirstDrop = socketPos.z - _fineJoint.z;
+                    if (_fineFirstDrop < _fineMinFirstDropMm) {
+                        const _deepenStep = 0.5;
+                        const _deepened: Vec3 = { x: _fineJoint.x, y: _fineJoint.y, z: _fineJoint.z };
+                        for (let _zTry = _fineJoint.z - _deepenStep; _zTry > rootTopZ + 1; _zTry -= _deepenStep) {
+                            const _jTry: Vec3 = { x: _deepened.x, y: _deepened.y, z: _zTry };
+                            // seg1: socket → deepened joint
+                            if (segmentBlockedBetween(socketPos, _jTry)) break;
+                            if (!firstSegmentSatisfiesSocketElbowMaxAngle(socketPos, _jTry, maxSegmentAngleFromVerticalDeg)) continue;
+                            // seg2: deepened joint → rootTop
+                            const _crt: Vec3 = { x: oc.baseXY.x, y: oc.baseXY.y, z: rootTopZ };
+                            if (segmentBlockedBetween(_jTry, _crt)) continue;
+                            if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(_jTry, _crt, maxSegmentAngleFromVerticalDeg)) continue;
+                            _deepened.z = _zTry;
+                        }
+                        if (_deepened.z < _fineJoint.z) {
+                            _fineJoint = _deepened;
+                        }
+                    }
+                }
+
+                finalJoints = [_fineJoint];
                 finalBase = {
                     basePos: { x: oc.baseXY.x, y: oc.baseXY.y, z: 0 },
                     rootTopTarget: candRootTop,
@@ -3518,11 +3750,94 @@ export function calculateSmartPlacementV2(
         }
     }
 
+    // Deepen shallow single joints: when the final result has exactly one
+    // joint with very little Z drop, push it down so the first segment is
+    // more vertical and printable.  Same logic as the wide-step deepening.
+    if (finalJoints.length === 1 && (socketPos.z - finalJoints[0].z) < 4.0) {
+        const _jOrig = finalJoints[0];
+        const _crtB: Vec3 = { x: finalBase.basePos.x, y: finalBase.basePos.y, z: rootTopZ };
+        const _deepenStep = 0.5;
+        let _bestZ = _jOrig.z;
+        const _xyOffsets = [0, 0.3, 0.6];
+        for (let _zTry = _jOrig.z - _deepenStep; _zTry > rootTopZ + 1; _zTry -= _deepenStep) {
+            let _foundAtZ = false;
+            for (const _offR of _xyOffsets) {
+                const _angles = _offR === 0 ? [0] : [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI, 5 * Math.PI / 4, 3 * Math.PI / 2, 7 * Math.PI / 4];
+                for (const _ang of _angles) {
+                    const _jx = _jOrig.x + Math.cos(_ang) * _offR;
+                    const _jy = _jOrig.y + Math.sin(_ang) * _offR;
+                    const _jTry: Vec3 = { x: _jx, y: _jy, z: _zTry };
+                    // seg1: socket → deepened joint
+                    if (segmentBlockedBetween(socketPos, _jTry)) continue;
+                    if (!firstSegmentSatisfiesSocketElbowMaxAngle(socketPos, _jTry, maxSegmentAngleFromVerticalDeg)) continue;
+                    // seg2: deepened joint → rootTop
+                    const _crtJ: Vec3 = { x: _jx, y: _jy, z: rootTopZ };
+                    if (!rootsDiskBlockedAt(_jx, _jy) && !segmentBlockedBetween(_jTry, _crtJ)
+                        && segmentSatisfiesLengthAwareMaxAngleFromVertical(_jTry, _crtJ, maxSegmentAngleFromVerticalDeg)) {
+                        _bestZ = _zTry;
+                        finalBase = {
+                            basePos: { x: _jx, y: _jy, z: 0 },
+                            rootTopTarget: _crtJ,
+                            snapDistance: distanceXY({ x: _jx, y: _jy, z: 0 }, unsnappedBottomPos),
+                            nodeKey: null,
+                        };
+                        _foundAtZ = true;
+                        break;
+                    }
+                }
+                if (_foundAtZ) break;
+            }
+            if (!_foundAtZ) break;
+        }
+        if (_bestZ < _jOrig.z) {
+            finalJoints = [{ x: finalBase.basePos.x, y: finalBase.basePos.y, z: _bestZ }];
+        }
+    }
+
+    // Terminal joint cleanup: when the last joint sits directly above the
+    // base (same XY), it's often just an A* grid artifact — the path reached
+    // the base column early and added a vertical drop segment.  Try removing
+    // it with progressively relaxed clearance since base-adjacent segments
+    // are less sensitive to resin overexposure than socket-adjacent ones.
+    if (finalJoints.length >= 1) {
+        const _lastJ = finalJoints[finalJoints.length - 1];
+        const _lastDxy = distanceXY(_lastJ, finalBase.rootTopTarget);
+        if (_lastDxy < 0.6) {
+            const _prevPt = finalJoints.length >= 2
+                ? finalJoints[finalJoints.length - 2]
+                : socketPos;
+            const _directTarget = finalBase.rootTopTarget;
+            if (segmentSatisfiesLengthAwareMaxAngleFromVertical(_prevPt, _directTarget, maxSegmentAngleFromVerticalDeg)) {
+                // Try full clearance first, then half clearance
+                let _canRemove = !segmentBlockedBetween(_prevPt, _directTarget);
+                if (!_canRemove) {
+                    _canRemove = !sdf.segmentBlocked(
+                        _prevPt.x, _prevPt.y, _prevPt.z,
+                        _directTarget.x, _directTarget.y, _directTarget.z,
+                        clearance * 0.4,
+                    );
+                }
+                if (_canRemove) {
+                    finalJoints = finalJoints.slice(0, -1);
+                }
+            }
+        }
+    }
+
     // 8. Quality gate: reject paths where routing joints are compressed into a
     //    tight Z band near the socket — signature of squeezing through a crack.
+    //    A legitimate detour around a small obstacle also has a tight Z span,
+    //    but it displaces the joints laterally by at least the obstacle
+    //    clearance; a genuine crack squeeze wiggles joints in place. Only the
+    //    combination (tight Z span AND no real lateral displacement) is
+    //    crack-like.
     if (finalJoints.length >= 2) {
         const routingZSpan = socketPos.z - finalJoints[finalJoints.length - 1].z;
-        if (routingZSpan < minRoutingZSpanMm) {
+        const maxJointLateralFromSocketMm = finalJoints.reduce(
+            (max, joint) => Math.max(max, distanceXY(joint, socketPos)),
+            0,
+        );
+        if (routingZSpan < minRoutingZSpanMm && maxJointLateralFromSocketMm < 2 * clearance) {
             const straightRescueFallback = buildStraightRescueFallback();
             if (straightRescueFallback) {
                 return straightRescueFallback;
@@ -3568,7 +3883,13 @@ export function calculateSmartPlacementV2(
             };
         }
 
-        if (!segmentSatisfiesLengthAwareMaxAngleFromVertical(a, b, maxSegmentAngleFromVerticalDeg)) {
+        // The first segment below the socket may use the short steep
+        // socket-elbow allowance; the rest of the chain uses the regular
+        // length-aware rule.
+        const segmentAngleOk = i === 0
+            ? firstSegmentSatisfiesSocketElbowMaxAngle(a, b, maxSegmentAngleFromVerticalDeg)
+            : segmentSatisfiesLengthAwareMaxAngleFromVertical(a, b, maxSegmentAngleFromVerticalDeg);
+        if (!segmentAngleOk) {
             const straightRescueFallback = buildStraightRescueFallback();
             if (straightRescueFallback) {
                 return straightRescueFallback;
@@ -3635,6 +3956,28 @@ export function calculateSmartPlacementV2(
             `  base/rootTop: (${finalBase.basePos.x.toFixed(2)},${finalBase.basePos.y.toFixed(2)}) rootTopZ=${finalBase.rootTopTarget.z.toFixed(2)}\n` +
             segmentLog.join('\n'),
         );
+    }
+
+    // Quality gate: reject excessively complex routed paths in the fine-step
+    // path too (same criteria as the wide-step quality gate).
+    {
+        const _firstDrop = finalJoints.length > 0 ? (socketPos.z - finalJoints[0].z) : Infinity;
+        const _isExcessive =
+            finalJoints.length >= 3
+            || (finalJoints.length >= 2 && _firstDrop < 2.0)
+            || (finalJoints.length >= 1 && _firstDrop < 0.5);
+        if (!isPreview && _isExcessive) {
+            const _rescue = buildStraightRescueFallback();
+            if (_rescue) {
+                if (!isPreview) {
+                    console.log(
+                        `[SmartPlacementV2] PLACED support rejected — excessive complexity (joints=${finalJoints.length} firstDrop=${_firstDrop.toFixed(2)}mm), falling back to rescue`,
+                    );
+                }
+                publishPathfindingDebugSnapshot();
+                return _rescue;
+            }
+        }
     }
 
     publishPathfindingDebugSnapshot();
@@ -3785,13 +4128,13 @@ function jointsAreNearCollinear(a: Vec3, b: Vec3, c: Vec3): boolean {
 function jointAddsNegligibleLateralDetour(a: Vec3, b: Vec3, c: Vec3): boolean {
     const splitLateral = distanceXY(a, b) + distanceXY(b, c);
     const directLateral = distanceXY(a, c);
-    return splitLateral - directLateral <= 0.75;
+    return splitLateral - directLateral <= 1.5;
 }
 
 function jointAddsNegligibleLengthDetour(a: Vec3, b: Vec3, c: Vec3): boolean {
     const splitLength = distance3D(a, b) + distance3D(b, c);
     const directLength = distance3D(a, c);
-    return splitLength - directLength <= 1.0;
+    return splitLength - directLength <= 2.0;
 }
 
 /**

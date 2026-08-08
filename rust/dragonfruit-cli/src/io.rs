@@ -7,8 +7,10 @@ use std::path::Path;
 
 use serde::{de::DeserializeOwned, Serialize};
 
-use dragonfruit_slicing_engine::geometry::{parse_triangles, Triangle};
-use dragonfruit_islands::model::{ComponentInfo, RleLabels, RleMask};
+use dragonfruit_slicing_engine::geometry::Triangle;
+#[cfg(test)]
+use dragonfruit_slicing_engine::geometry::parse_triangles;
+use dragonfruit_islands::model::{RleLabels, RleMask};
 
 // ---------------------------------------------------------------------------
 // STL Loading
@@ -438,6 +440,225 @@ pub fn write_3mf(path: &Path, positions: &[f32]) -> Result<(), String> {
 
     zip.finish().map_err(|e| format!("3MF finalize: {e}"))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// VOXL Loading (V2 binary + ORIG full-res chunk preference)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct VoxlChunkEntry {
+    type_tag: [u8; 4],
+    index: u16,
+    compression: u16,
+    offset: usize,
+    compressed_size: usize,
+    uncompressed_size: usize,
+}
+
+/// Helper function to parse binary STL buffer from memory.
+pub fn parse_binary_stl_bytes(data: &[u8]) -> Result<Vec<f32>, String> {
+    if data.len() < 84 {
+        return Err("STL byte buffer too small (< 84 bytes)".into());
+    }
+    let num_triangles = u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as usize;
+    let expected = 84 + num_triangles * 50;
+    if data.len() < expected {
+        return Err(format!(
+            "STL bytes truncated: expected {} bytes for {} triangles, got {}",
+            expected, num_triangles, data.len()
+        ));
+    }
+    let mut flat = Vec::with_capacity(num_triangles * 9);
+    let mut offset = 84;
+    for _ in 0..num_triangles {
+        offset += 12; // skip normal
+        for _ in 0..3 {
+            flat.push(f32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]));
+            flat.push(f32::from_le_bytes([
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
+            ]));
+            flat.push(f32::from_le_bytes([
+                data[offset + 8],
+                data[offset + 9],
+                data[offset + 10],
+                data[offset + 11],
+            ]));
+            offset += 12;
+        }
+        offset += 2; // attribute byte count
+    }
+    Ok(flat)
+}
+
+/// Check if file starts with VOXL V2 binary header.
+pub fn is_voxl_file(path: &Path) -> bool {
+    if let Ok(mut file) = std::fs::File::open(path) {
+        let mut header = [0u8; 6];
+        if std::io::Read::read_exact(&mut file, &mut header).is_ok() {
+            if &header[0..4] == b"VOXL" {
+                let ver = u16::from_le_bytes([header[4], header[5]]);
+                return ver >= 2;
+            }
+        }
+    }
+    false
+}
+
+/// Load triangles from a VOXL binary file.
+/// Prefers `ORIG` (full-resolution) chunks over `MESH` (preview) chunks.
+/// Returns `(positions_f32, used_orig_chunk)`.
+pub fn load_voxl_triangles(path: &Path) -> Result<(Vec<f32>, bool), String> {
+    use flate2::read::ZlibDecoder;
+
+    let data = std::fs::read(path).map_err(|e| format!("Failed to read VOXL file: {e}"))?;
+    if data.len() < 16 {
+        return Err("VOXL file too small (< 16 bytes)".into());
+    }
+    if &data[0..4] != b"VOXL" {
+        return Err("Invalid VOXL magic header".into());
+    }
+    let ver = u16::from_le_bytes([data[4], data[5]]);
+    if ver < 2 {
+        return Err(format!("Unsupported VOXL container version: {ver}"));
+    }
+    let chunk_count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+    let dir_end = 16 + chunk_count * 20;
+    if data.len() < dir_end {
+        return Err("VOXL file truncated: incomplete chunk directory".into());
+    }
+
+    let mut entries = Vec::with_capacity(chunk_count);
+    for i in 0..chunk_count {
+        let b = 16 + i * 20;
+        let mut type_tag = [0u8; 4];
+        type_tag.copy_from_slice(&data[b..b + 4]);
+        let index = u16::from_le_bytes([data[b + 4], data[b + 5]]);
+        let compression = u16::from_le_bytes([data[b + 6], data[b + 7]]);
+        let offset = u32::from_le_bytes([data[b + 8], data[b + 9], data[b + 10], data[b + 11]]) as usize;
+        let compressed_size = u32::from_le_bytes([data[b + 12], data[b + 13], data[b + 14], data[b + 15]]) as usize;
+        let uncompressed_size = u32::from_le_bytes([data[b + 16], data[b + 17], data[b + 18], data[b + 19]]) as usize;
+
+        if offset + compressed_size > data.len() {
+            return Err("VOXL chunk extends beyond file boundary".into());
+        }
+
+        entries.push(VoxlChunkEntry {
+            type_tag,
+            index,
+            compression,
+            offset,
+            compressed_size,
+            uncompressed_size,
+        });
+    }
+
+    let read_chunk_data = |entry: &VoxlChunkEntry| -> Result<Vec<u8>, String> {
+        let raw = &data[entry.offset..entry.offset + entry.compressed_size];
+        match entry.compression {
+            0 => Ok(raw.to_vec()),
+            1 => {
+                let mut decoder = ZlibDecoder::new(raw);
+                let mut out = Vec::with_capacity(entry.uncompressed_size);
+                std::io::Read::read_to_end(&mut decoder, &mut out)
+                    .map_err(|e| format!("Decompress chunk failed: {e}"))?;
+                Ok(out)
+            }
+            c => Err(format!("Unsupported compression mode {c}")),
+        }
+    };
+
+    let orig_chunk_indices: Vec<u16> = entries.iter().filter(|e| &e.type_tag == b"ORIG").map(|e| e.index).collect();
+    let mesh_chunk_indices: Vec<u16> = entries.iter().filter(|e| &e.type_tag == b"MESH").map(|e| e.index).collect();
+
+    // 1. If embedded ORIG chunks are present, load them
+    if !orig_chunk_indices.is_empty() {
+        let mut idxs = orig_chunk_indices;
+        idxs.sort();
+        idxs.dedup();
+        let mut all_positions = Vec::new();
+        for &idx in &idxs {
+            if let Some(entry) = entries.iter().find(|e| &e.type_tag == b"ORIG" && e.index == idx) {
+                let chunk_bytes = read_chunk_data(entry)?;
+                let pos = parse_binary_stl_bytes(&chunk_bytes)?;
+                all_positions.extend_from_slice(&pos);
+            }
+        }
+        return Ok((all_positions, true));
+    }
+
+    // 2. Check for originalRef / sidecar file references in MODL chunk if no embedded ORIG chunk exists
+    if let Some(modl_entry) = entries.iter().find(|e| &e.type_tag == b"MODL") {
+        if let Ok(modl_bytes) = read_chunk_data(modl_entry) {
+            if let Ok(modl_str) = std::str::from_utf8(&modl_bytes) {
+                if let Ok(models) = serde_json::from_str::<serde_json::Value>(modl_str) {
+                    if let Some(model_list) = models.as_array() {
+                        let mut sidecar_positions = Vec::new();
+                        let mut loaded_sidecars = 0;
+
+                        for model in model_list {
+                            let file_name = model.get("originalRef")
+                                .and_then(|r| r.get("fileName"))
+                                .and_then(|v| v.as_str())
+                                .or_else(|| model.get("sourcePath").and_then(|v| v.as_str()));
+
+                            if let Some(fname) = file_name {
+                                let fname_trimmed = fname.trim();
+                                if !fname_trimmed.is_empty() {
+                                    let rel_path = Path::new(fname_trimmed);
+                                    let sidecar_path = if rel_path.is_absolute() {
+                                        rel_path.to_path_buf()
+                                    } else {
+                                        path.parent().unwrap_or_else(|| Path::new("")).join(rel_path)
+                                    };
+
+                                    if sidecar_path.exists() {
+                                        if let Ok(pos) = load_binary_stl(&sidecar_path) {
+                                            sidecar_positions.extend_from_slice(&pos);
+                                            loaded_sidecars += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if loaded_sidecars > 0 && !sidecar_positions.is_empty() {
+                            return Ok((sidecar_positions, true));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: load MESH chunks (decimated preview)
+    let mut idxs = mesh_chunk_indices;
+    idxs.sort();
+    idxs.dedup();
+
+    if idxs.is_empty() {
+        return Err("No MESH or ORIG geometry chunks found in VOXL file".into());
+    }
+
+    let mut all_positions = Vec::new();
+
+    for &idx in &idxs {
+        if let Some(entry) = entries.iter().find(|e| &e.type_tag == b"MESH" && e.index == idx) {
+            let chunk_bytes = read_chunk_data(entry)?;
+            let pos = parse_binary_stl_bytes(&chunk_bytes)?;
+            all_positions.extend_from_slice(&pos);
+        }
+    }
+
+    Ok((all_positions, false))
 }
 
 // ---------------------------------------------------------------------------

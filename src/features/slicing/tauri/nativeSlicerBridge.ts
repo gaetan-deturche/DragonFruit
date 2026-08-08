@@ -1,3 +1,5 @@
+import { clampSliceJobNumber } from '../sliceJobLimits';
+
 type TauriCoreModule = {
   invoke: <T>(cmd: string, args?: Record<string, unknown> | ArrayBuffer | Uint8Array, options?: { headers: HeadersInit }) => Promise<T>;
 };
@@ -17,9 +19,7 @@ export type NativeSolidSliceJobEnvelope = {
   widthPx: number;
   heightPx: number;
   xPackingMode: 'none' | 'rgb8_div3' | 'gray3_div2';
-  computeBackend?: 'auto' | 'cpu' | 'gpu';
   pngCompressionStrategy: 'fastest' | 'balanced' | 'smallest' | 'optimal';
-  bvhAccelerationEnabled: boolean;
   antiAliasingLevel: AntiAliasingLevel;
   antiAliasingMode: 'Blur' | '3DAA' | 'Vertical2' | 'Coverage';
   blurBrushRadiusPx: number;
@@ -35,8 +35,6 @@ export type NativeSolidSliceJobEnvelope = {
   mirrorX: boolean;
   mirrorY: boolean;
   zBlendLookBack?: number;
-  zBlendFadePx?: number;
-  zBlendAutoFade?: boolean;
   zBlendMinimumAlphaPercent?: number;
   zBlendMaxAlphaPercent?: number;
   zBlendCustomLut?: number[];
@@ -66,62 +64,6 @@ export type NativeSolidSliceJobEnvelope = {
   ditherDeviceGamma?: number;
 };
 
-type NativeSolidSlicePayload = {
-  output_format: string;
-  format_version?: string | null;
-  source_width_px: number;
-  source_height_px: number;
-  width_px: number;
-  height_px: number;
-  x_packing_mode: 'none' | 'rgb8_div3' | 'gray3_div2';
-  compute_backend: 'auto' | 'cpu' | 'gpu';
-  png_compression_strategy: 'fastest' | 'balanced' | 'smallest' | 'optimal';
-  bvh_acceleration_enabled: boolean;
-  anti_aliasing_level: AntiAliasingLevel;
-  anti_aliasing_mode: 'Blur' | '3DAA' | 'Vertical2' | 'Coverage';
-  blur_brush_radius_px: number;
-  blur_brush_kernel: 'box' | 'gaussian';
-  blur_brush_sigma_x: number;
-  blur_brush_sigma_y: number;
-  z_blur_radius_layers: number;
-  z_blur_kernel: 'box' | 'gaussian';
-  z_blur_sigma: number;
-  aa_on_supports: boolean;
-  minimum_aa_alpha_percent: number;
-  mirror_x: boolean;
-  mirror_y: boolean;
-  z_blend_look_back?: number;
-  z_blend_fade_px?: number;
-  z_blend_auto_fade?: boolean;
-  z_blend_minimum_alpha_percent?: number;
-  z_blend_max_alpha_percent?: number;
-  z_blend_custom_lut?: number[];
-  zaa_kernel?: 'perturb';
-  zaa_pattern?: 'uniform' | 'halton' | 'base2';
-  zaa_duplicate_z?: boolean;
-  model_triangle_count: number;
-  container_compression_level: number;
-  build_width_mm: number;
-  build_depth_mm: number;
-  layer_height_mm: number;
-  total_layers: number;
-  export_thumbnail_png_base64?: string | null;
-  triangles_xyz: number[];
-  mesh_encoding?: 'raw_f32' | 'quantized_u16';
-  mesh_quantization?: {
-    min_x: number;
-    min_y: number;
-    min_z: number;
-    max_x: number;
-    max_y: number;
-    max_z: number;
-  } | null;
-  metadata_json: string;
-  dither_enabled?: boolean;
-  dither_bit_depth?: number | null;
-  dither_device_gamma?: number;
-};
-
 /** Metadata-only payload for the binary mesh staging path (no inline triangles). */
 type NativeSolidSliceMetadataPayload = {
   output_format: string;
@@ -147,8 +89,6 @@ type NativeSolidSliceMetadataPayload = {
   mirror_x: boolean;
   mirror_y: boolean;
   z_blend_look_back?: number;
-  z_blend_fade_px?: number;
-  z_blend_auto_fade?: boolean;
   z_blend_minimum_alpha_percent?: number;
   z_blend_max_alpha_percent?: number;
   z_blend_custom_lut?: number[];
@@ -223,67 +163,14 @@ async function loadTauriEvent(): Promise<TauriEventModule | null> {
   return tauriEventPromise;
 }
 
-function toNativePayload(job: NativeSolidSliceJobEnvelope): NativeSolidSlicePayload {
-  return {
-    output_format: job.outputFormat,
-    format_version: job.formatVersion ?? null,
-    source_width_px: job.sourceWidthPx,
-    source_height_px: job.sourceHeightPx,
-    width_px: job.widthPx,
-    height_px: job.heightPx,
-    x_packing_mode: job.xPackingMode,
-    compute_backend: job.computeBackend ?? 'auto',
-    png_compression_strategy: job.pngCompressionStrategy,
-    bvh_acceleration_enabled: job.bvhAccelerationEnabled,
-    anti_aliasing_level: job.antiAliasingLevel,
-    anti_aliasing_mode: job.antiAliasingMode,
-    blur_brush_radius_px: Math.max(1, Math.round(job.blurBrushRadiusPx ?? 1)),
-    blur_brush_kernel: job.blurBrushKernel ?? 'gaussian',
-    blur_brush_sigma_x: Math.max(0.05, Math.min(16, Number(job.blurBrushSigmaX ?? job.blurBrushSigma ?? 0.5))),
-    blur_brush_sigma_y: Math.max(0.05, Math.min(16, Number(job.blurBrushSigmaY ?? job.blurBrushSigma ?? 0.5))),
-    z_blur_radius_layers: Math.max(0, Math.min(8, Math.round(job.zBlurRadiusLayers ?? 0))),
-    z_blur_kernel: job.zBlurKernel ?? 'box',
-    z_blur_sigma: Math.max(0.05, Math.min(16, Number(job.zBlurSigma ?? 0.5))),
-    aa_on_supports: job.aaOnSupports,
-    minimum_aa_alpha_percent: Math.max(0, Math.min(100, Number(job.minimumAaAlphaPercent) || 0)),
-    mirror_x: job.mirrorX,
-    mirror_y: job.mirrorY,
-    z_blend_look_back: Math.max(1, Math.round(job.zBlendLookBack ?? 2)),
-    z_blend_fade_px: Math.max(1, Math.round(job.zBlendFadePx ?? 20)),
-    z_blend_auto_fade: job.zBlendAutoFade !== false,
-    z_blend_minimum_alpha_percent: Math.max(0, Math.min(100, Number(job.zBlendMinimumAlphaPercent ?? 0))),
-    z_blend_max_alpha_percent: Math.max(0, Math.min(100, Number(job.zBlendMaxAlphaPercent ?? 90))),
-    z_blend_custom_lut: job.zBlendCustomLut,
-    zaa_kernel: job.zaaKernel,
-    zaa_pattern: job.zaaPattern,
-    zaa_duplicate_z: job.zaaDuplicateZ,
-    model_triangle_count: job.modelTriangleCount,
-    container_compression_level: Math.max(0, Math.min(9, Math.round(job.containerCompressionLevel ?? 2))),
-    build_width_mm: job.buildWidthMm,
-    build_depth_mm: job.buildDepthMm,
-    layer_height_mm: job.layerHeightMm,
-    total_layers: job.totalLayers,
-    export_thumbnail_png_base64: job.exportThumbnailPngBase64 ?? null,
-    triangles_xyz: Array.from(job.trianglesXYZ),
-    mesh_encoding: job.meshEncoding ?? 'raw_f32',
-    mesh_quantization: job.meshQuantization
-      ? {
-          min_x: job.meshQuantization.minX,
-          min_y: job.meshQuantization.minY,
-          min_z: job.meshQuantization.minZ,
-          max_x: job.meshQuantization.maxX,
-          max_y: job.meshQuantization.maxY,
-          max_z: job.meshQuantization.maxZ,
-        }
-      : null,
-    metadata_json: job.metadataJson,
-    dither_enabled: job.ditherEnabled ?? false,
-    dither_bit_depth: job.ditherBitDepth ?? null,
-    dither_device_gamma: job.ditherDeviceGamma ?? 3.0,
-  };
-}
-
-function toNativeMetadataPayload(job: NativeSolidSliceJobEnvelope): NativeSolidSliceMetadataPayload {
+/**
+ * Build the snake_case payload the Rust `SliceJobMetadata` command deserializes.
+ *
+ * Exported for the crossing contract test: this mapper, not the type above, is
+ * what decides which fields actually reach the engine. A field can be declared
+ * on both sides and still be dropped here.
+ */
+export function toNativeMetadataPayload(job: NativeSolidSliceJobEnvelope): NativeSolidSliceMetadataPayload {
   return {
     output_format: job.outputFormat,
     format_version: job.formatVersion ?? null,
@@ -296,28 +183,26 @@ function toNativeMetadataPayload(job: NativeSolidSliceJobEnvelope): NativeSolidS
     png_compression_strategy: job.pngCompressionStrategy,
     anti_aliasing_level: job.antiAliasingLevel,
     anti_aliasing_mode: job.antiAliasingMode,
-    blur_brush_radius_px: Math.max(1, Math.round(job.blurBrushRadiusPx ?? 1)),
+    blur_brush_radius_px: clampSliceJobNumber('blurBrushRadiusPx', job.blurBrushRadiusPx),
     blur_brush_kernel: job.blurBrushKernel ?? 'gaussian',
-    blur_brush_sigma_x: Math.max(0.05, Math.min(16, Number(job.blurBrushSigmaX ?? job.blurBrushSigma ?? 0.5))),
-    blur_brush_sigma_y: Math.max(0.05, Math.min(16, Number(job.blurBrushSigmaY ?? job.blurBrushSigma ?? 0.5))),
-    z_blur_radius_layers: Math.max(0, Math.min(8, Math.round(job.zBlurRadiusLayers ?? 0))),
+    blur_brush_sigma_x: clampSliceJobNumber('blurBrushSigmaX', job.blurBrushSigmaX ?? job.blurBrushSigma),
+    blur_brush_sigma_y: clampSliceJobNumber('blurBrushSigmaY', job.blurBrushSigmaY ?? job.blurBrushSigma),
+    z_blur_radius_layers: clampSliceJobNumber('zBlurRadiusLayers', job.zBlurRadiusLayers),
     z_blur_kernel: job.zBlurKernel ?? 'box',
-    z_blur_sigma: Math.max(0.05, Math.min(16, Number(job.zBlurSigma ?? 0.5))),
+    z_blur_sigma: clampSliceJobNumber('zBlurSigma', job.zBlurSigma),
     aa_on_supports: job.aaOnSupports,
-    minimum_aa_alpha_percent: Math.max(0, Math.min(100, Number(job.minimumAaAlphaPercent) || 0)),
+    minimum_aa_alpha_percent: clampSliceJobNumber('minimumAaAlphaPercent', job.minimumAaAlphaPercent),
     mirror_x: job.mirrorX,
     mirror_y: job.mirrorY,
-    z_blend_look_back: Math.max(1, Math.round(job.zBlendLookBack ?? 2)),
-    z_blend_fade_px: Math.max(1, Math.round(job.zBlendFadePx ?? 20)),
-    z_blend_auto_fade: job.zBlendAutoFade !== false,
-    z_blend_minimum_alpha_percent: Math.max(0, Math.min(100, Number(job.zBlendMinimumAlphaPercent ?? 0))),
-    z_blend_max_alpha_percent: Math.max(0, Math.min(100, Number(job.zBlendMaxAlphaPercent ?? 90))),
+    z_blend_look_back: clampSliceJobNumber('zBlendLookBack', job.zBlendLookBack),
+    z_blend_minimum_alpha_percent: clampSliceJobNumber('zBlendMinimumAlphaPercent', job.zBlendMinimumAlphaPercent),
+    z_blend_max_alpha_percent: clampSliceJobNumber('zBlendMaxAlphaPercent', job.zBlendMaxAlphaPercent),
     z_blend_custom_lut: job.zBlendCustomLut,
     zaa_kernel: job.zaaKernel,
     zaa_pattern: job.zaaPattern,
     zaa_duplicate_z: job.zaaDuplicateZ,
-    model_triangle_count: Math.max(0, Math.floor(job.modelTriangleCount ?? 0)),
-    container_compression_level: Math.max(0, Math.min(9, Math.round(job.containerCompressionLevel ?? 2))),
+    model_triangle_count: clampSliceJobNumber('modelTriangleCount', job.modelTriangleCount),
+    container_compression_level: clampSliceJobNumber('containerCompressionLevel', job.containerCompressionLevel),
     build_width_mm: job.buildWidthMm,
     build_depth_mm: job.buildDepthMm,
     layer_height_mm: job.layerHeightMm,
@@ -418,97 +303,6 @@ export type NativeSlicerRuntimeMetrics = {
   wrapperTotalNs?: number;
   wrapperOverheadNs?: number;
 };
-
-/**
- * Invoke the native slicer with real per-layer progress events and cooperative cancellation.
- */
-export async function sliceSolidAndEncodeWithNativeSlicer(
-  job: NativeSolidSliceJobEnvelope,
-  abortSignal?: AbortSignal,
-  onProgress?: SlicerProgressCallback,
-): Promise<Uint8Array> {
-  const core = await loadTauriCore();
-  if (!core) {
-    throw new Error('Native slicer is only available in DragonFruit Desktop (Tauri runtime).');
-  }
-
-  if (abortSignal?.aborted) {
-    throw createAbortError();
-  }
-
-  // Subscribe to real per-layer progress events from the Rust backend
-  const eventModule = await loadTauriEvent();
-  let unlistenProgress: (() => void) | null = null;
-
-  if (eventModule && onProgress) {
-    unlistenProgress = await eventModule.listen<SliceProgressEvent>(
-      'slicer://progress',
-      (event) => {
-        onProgress(event.payload.done, event.payload.total, event.payload.phase ?? 'Slicing');
-      },
-    );
-  }
-
-  // Set up abort handler: sends cancel_slicing command to Rust then rejects
-  let settled = false;
-  const payload = JSON.stringify(toNativePayload(job));
-
-  const cleanup = () => {
-    if (unlistenProgress) {
-      unlistenProgress();
-      unlistenProgress = null;
-    }
-  };
-
-  try {
-    const resultPromise = core.invoke<ArrayBuffer>('slice_solid_native', { jobJson: payload });
-
-    if (!abortSignal) {
-      const result = await resultPromise;
-      cleanup();
-      return new Uint8Array(result);
-    }
-
-    // Race the invoke against the abort signal
-    const result = await new Promise<ArrayBuffer>((resolve, reject) => {
-      const handleAbort = () => {
-        if (settled) return;
-        settled = true;
-        // Tell Rust to stop
-        core.invoke('cancel_slicing').catch(() => {});
-        reject(createAbortError());
-      };
-
-      abortSignal.addEventListener('abort', handleAbort, { once: true });
-
-      resultPromise
-        .then((res) => {
-          if (settled) return;
-          settled = true;
-          abortSignal.removeEventListener('abort', handleAbort);
-          resolve(res);
-        })
-        .catch((err) => {
-          if (settled) return;
-          settled = true;
-          abortSignal.removeEventListener('abort', handleAbort);
-          // Rust cancelled errors should map to AbortError
-          if (typeof err === 'string' && err.includes('cancelled')) {
-            reject(createAbortError());
-          } else {
-            reject(err);
-          }
-        });
-    });
-
-    cleanup();
-    return new Uint8Array(result);
-  } catch (error) {
-    cleanup();
-    throw error;
-  }
-}
-
 /**
  * Invoke the native slicer and keep the encoded artifact on disk,
  * returning temp file metadata instead of the full byte buffer.
@@ -772,26 +566,69 @@ export async function writeBytesToNativePath(
 }
 
 /**
- * Writes `bytes` to `destinationPath` using the raw-binary `append_mesh_stage_chunk` IPC command,
- * sending the data in chunks to avoid JSON-encoding the entire buffer over IPC.
- * Each call sequences through chunks of `chunkSize` bytes (default 4 MB).
- * The first chunk truncates/creates the file; subsequent chunks append to it.
+ * Minimal `invoke` surface the native write seam needs. Declared separately so
+ * the write functions can be driven by a recorder in tests without mocking the
+ * `@tauri-apps/api/core` module.
  */
-export async function writeChunkedToNativePath(
+export type NativeWriteInvoke = TauriCoreModule['invoke'];
+
+/**
+ * Writer single-flight (Ph0.1 sub-phase A, finding N2).
+ *
+ * Rust keeps exactly ONE process-global chunk appender. Two chunk sequences to
+ * different paths therefore evict each other and re-truncate on every
+ * switch-back, destroying both files with no error. The live pairs are autosave,
+ * explicit save, mesh staging for hollow/punch/repair/mirror, and native 3MF —
+ * only slicing and printing were guarded (`page.tsx:811-813`).
+ *
+ * The lock is a module-level promise chain rather than a Rust-side mutex or a
+ * per-path appender map because it is the least invasive mechanism that is
+ * actually correct here: the webview runs one JS thread, so every caller of
+ * every native write funnels through this one module and a promise chain *is* a
+ * true process-wide mutex for them — with no change to
+ * `append_mesh_stage_chunk`'s truncate-on-fresh-appender semantics, which mesh
+ * staging, 3MF, and the atomic commit all depend on. A second writer defers
+ * (queues) rather than failing, so no caller needs to learn to retry.
+ *
+ * It is a lock, not a fix for reentrancy: never call a queued function from
+ * inside another queued function — compose at the `…Unlocked` layer instead
+ * (see `writeFileAtomicWithInvoke`).
+ *
+ * The one native-write caller that does not funnel through here is
+ * `sliceExportOrchestrator.handleMeshFileChunk`, which streams
+ * `append_mesh_stage_chunk` directly from a geometry-collection callback. It is
+ * covered instead by the Rust-side backstop in `stage_append_chunk`, which turns
+ * an interleave into a loud error rather than two corrupt files.
+ */
+let nativeWriteQueue: Promise<unknown> = Promise.resolve();
+
+export function runExclusiveNativeWrite<T>(task: () => Promise<T>): Promise<T> {
+  const run = nativeWriteQueue.then(task, task);
+  // Keep the chain alive after a rejection so one failed write cannot wedge
+  // every subsequent one.
+  nativeWriteQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * Chunked write with an explicit `invoke`, **without** taking the single-flight
+ * lock. Internal composition seam — exported for the write-seam tests and for
+ * `writeFileAtomicWithInvoke`, which holds the lock across its whole sequence.
+ */
+export async function writeChunkedUnlocked(
+  invoke: NativeWriteInvoke,
   destinationPath: string,
   bytes: Uint8Array,
   chunkSize = 4 * 1024 * 1024,
 ): Promise<void> {
-  const core = await loadTauriCore();
-  if (!core) {
-    throw new Error('Chunked file writing is only available in DragonFruit Desktop (Tauri runtime).');
-  }
-
   try {
     let offset = 0;
     while (offset < bytes.length) {
       const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
-      await core.invoke<number>('append_mesh_stage_chunk', chunk, {
+      await invoke<number>('append_mesh_stage_chunk', chunk, {
         headers: {
           'Content-Type': 'application/octet-stream',
           'x-mesh-stage-path': destinationPath,
@@ -804,13 +641,189 @@ export async function writeChunkedToNativePath(
     // Always close the backend writer for this path so the destination file
     // handle is released immediately (important for Explorer thumbnail reads).
     try {
-      await core.invoke<number>('finish_mesh_stage_write', {
+      await invoke<number>('finish_mesh_stage_write', {
         path: destinationPath,
       });
     } catch (error) {
       console.warn('[nativeSlicerBridge] Failed finishing chunked write appender.', error);
     }
   }
+}
+
+/**
+ * Writes `bytes` to `destinationPath` using the raw-binary `append_mesh_stage_chunk` IPC command,
+ * sending the data in chunks to avoid JSON-encoding the entire buffer over IPC.
+ * Each call sequences through chunks of `chunkSize` bytes (default 4 MB).
+ * The first chunk truncates/creates the file; subsequent chunks append to it.
+ *
+ * **Not crash-safe on its own** — the first chunk truncates the destination, so
+ * an interrupted sequence leaves a truncated file with no fallback. Callers
+ * writing a file the user would miss (scene files) must use
+ * `writeFileAtomicToNativePath` instead. This raw form stays for staging files
+ * and for formats written straight to a scratch destination.
+ *
+ * Serialized process-wide by `runExclusiveNativeWrite` — see its docs.
+ */
+export async function writeChunkedToNativePath(
+  destinationPath: string,
+  bytes: Uint8Array,
+  chunkSize = 4 * 1024 * 1024,
+): Promise<void> {
+  const core = await loadTauriCore();
+  if (!core) {
+    throw new Error('Chunked file writing is only available in DragonFruit Desktop (Tauri runtime).');
+  }
+
+  return runExclusiveNativeWrite(() =>
+    writeChunkedUnlocked(core.invoke, destinationPath, bytes, chunkSize),
+  );
+}
+
+/**
+ * Crash-safe write with an explicit `invoke`, **without** taking the
+ * single-flight lock. Exported for the write-seam tests.
+ *
+ * Write-to-temp → fsync → atomic rename. The destination is never opened for
+ * write until the payload is complete on disk, so a crash, OOM-kill, or power
+ * loss at any point leaves the previous good file exactly as it was.
+ */
+export async function writeFileAtomicUnlocked(
+  invoke: NativeWriteInvoke,
+  destinationPath: string,
+  bytes: Uint8Array,
+  chunkSize = 4 * 1024 * 1024,
+): Promise<void> {
+  const tempPath = await invoke<string>('scene_file_begin_atomic_write', {
+    targetPath: destinationPath,
+  });
+
+  try {
+    await writeChunkedUnlocked(invoke, tempPath, bytes, chunkSize);
+  } catch (error) {
+    // The destination has not been touched; clean up the staging file so a
+    // failed save does not litter the user's project folder.
+    try {
+      await invoke<void>('scene_file_discard_atomic_temp', { tempPath });
+    } catch (discardError) {
+      console.warn('[nativeSlicerBridge] Failed discarding atomic-write staging file.', discardError);
+    }
+    throw error;
+  }
+
+  await invoke<void>('scene_file_commit_atomic', {
+    tempPath,
+    targetPath: destinationPath,
+  });
+}
+
+/**
+ * Streaming counterpart of {@link writeFileAtomicUnlocked} (Ph0.1 sub-phase E),
+ * **without** the single-flight lock. Exported for the write-seam tests.
+ *
+ * `produce` is handed an `emit` function and calls it as many times as it likes;
+ * emissions are re-chunked at `chunkSize` and appended in order against a single
+ * open appender, so the caller never has to materialise the whole payload. Only
+ * the first IPC call carries offset 0, which is what tells Rust to open fresh —
+ * every later emission appends.
+ *
+ * The atomic contract is unchanged: temp → fsync → rename, destination untouched
+ * until the payload is complete.
+ */
+export async function writeFileAtomicStreamedUnlocked(
+  invoke: NativeWriteInvoke,
+  destinationPath: string,
+  produce: (emit: (bytes: Uint8Array) => Promise<void>) => Promise<void>,
+  chunkSize = 4 * 1024 * 1024,
+): Promise<number> {
+  const tempPath = await invoke<string>('scene_file_begin_atomic_write', {
+    targetPath: destinationPath,
+  });
+
+  let written = 0;
+  try {
+    try {
+      await produce(async (bytes: Uint8Array) => {
+        let local = 0;
+        while (local < bytes.length) {
+          const chunk = bytes.subarray(local, Math.min(local + chunkSize, bytes.length));
+          await invoke<number>('append_mesh_stage_chunk', chunk, {
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'x-mesh-stage-path': tempPath,
+              'x-mesh-stage-offset': String(written),
+            },
+          });
+          local += chunk.length;
+          written += chunk.length;
+        }
+      });
+    } finally {
+      // Always close the backend writer for this path, exactly as the buffered
+      // form does — the handle must be released before the commit renames it.
+      try {
+        await invoke<number>('finish_mesh_stage_write', { path: tempPath });
+      } catch (error) {
+        console.warn('[nativeSlicerBridge] Failed finishing streamed write appender.', error);
+      }
+    }
+  } catch (error) {
+    try {
+      await invoke<void>('scene_file_discard_atomic_temp', { tempPath });
+    } catch (discardError) {
+      console.warn('[nativeSlicerBridge] Failed discarding atomic-write staging file.', discardError);
+    }
+    throw error;
+  }
+
+  await invoke<void>('scene_file_commit_atomic', {
+    tempPath,
+    targetPath: destinationPath,
+  });
+
+  return written;
+}
+
+/**
+ * Crash-safe streaming write. Same seam and same guarantees as
+ * {@link writeFileAtomicToNativePath}; use it when the payload can be produced
+ * incrementally, so no contiguous copy of the document ever exists.
+ */
+export async function writeFileAtomicStreamedToNativePath(
+  destinationPath: string,
+  produce: (emit: (bytes: Uint8Array) => Promise<void>) => Promise<void>,
+  chunkSize = 4 * 1024 * 1024,
+): Promise<number> {
+  const core = await loadTauriCore();
+  if (!core) {
+    throw new Error('Atomic file writing is only available in DragonFruit Desktop (Tauri runtime).');
+  }
+
+  return runExclusiveNativeWrite(() =>
+    writeFileAtomicStreamedUnlocked(core.invoke, destinationPath, produce, chunkSize),
+  );
+}
+
+/**
+ * Crash-safe replacement for `writeChunkedToNativePath` on files the user would
+ * miss if they were destroyed (scene files).
+ *
+ * This is the **shared seam**: both autosave and explicit save reach it through
+ * `ExportManager.downloadFile`, so neither can regress to a truncate-first
+ * overwrite without the other noticing.
+ */
+export async function writeFileAtomicToNativePath(
+  destinationPath: string,
+  bytes: Uint8Array,
+  chunkSize = 4 * 1024 * 1024,
+): Promise<void> {
+  const core = await loadTauriCore();
+  if (!core) {
+    throw new Error('Atomic file writing is only available in DragonFruit Desktop (Tauri runtime).');
+  }
+
+  return runExclusiveNativeWrite(() =>
+    writeFileAtomicUnlocked(core.invoke, destinationPath, bytes, chunkSize),
+  );
 }
 
 /**
