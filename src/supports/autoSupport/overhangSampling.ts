@@ -101,13 +101,17 @@ export function generateOverhangCandidates(
     const ab = new THREE.Vector3();
     const normal = new THREE.Vector3();
 
-    type Cell = {
+    type Pt = {
         x: number; y: number; z: number;
         nx: number; ny: number; nz: number;
-        area: number;      // accumulated down-facing area in the cell
+        area: number;
         incDeg: number;
     };
-    const cells = new Map<string, Cell>();
+    // Points are collected per XY column, then split into Z-separated layers so
+    // that stacked overhangs (e.g. a bust's hair ABOVE the chest, with air
+    // between) each get a candidate. Keeping only the lowest point per column
+    // dropped every overhang sitting above a lower one.
+    const columns = new Map<string, Pt[]>();
 
     for (let t = 0; t < triCount; t++) {
         const iA = index ? index.getX(t * 3) : t * 3;
@@ -139,35 +143,49 @@ export function generateOverhangCandidates(
         const key = `${gx},${gy}`;
         const inc = (Math.acos(Math.min(1, Math.max(0, -normal.z))) * 180) / Math.PI;
 
-        const existing = cells.get(key);
-        if (!existing) {
-            cells.set(key, { x: cx, y: cy, z: cz, nx: normal.x, ny: normal.y, nz: normal.z, area, incDeg: inc });
-        } else {
-            existing.area += area;
-            // Keep the lowest point in the column — the most critical to hold.
-            if (cz < existing.z) {
-                existing.x = cx; existing.y = cy; existing.z = cz;
-                existing.nx = normal.x; existing.ny = normal.y; existing.nz = normal.z;
-                existing.incDeg = inc;
-            }
-        }
+        const pt: Pt = { x: cx, y: cy, z: cz, nx: normal.x, ny: normal.y, nz: normal.z, area, incDeg: inc };
+        const col = columns.get(key);
+        if (col) col.push(pt);
+        else columns.set(key, [pt]);
     }
 
+    // A vertical gap larger than this between consecutive down-faces in the same
+    // column marks a separate overhang (e.g. hair over shoulders). Continuous
+    // sloped faces stay a single candidate at their lowest point.
+    const LAYER_Z_GAP_MM = 10;
+
     const candidates: CandidatePoint[] = [];
-    for (const [key, c] of cells) {
-        candidates.push({
-            id: `overhang-${modelId}-${key}`,
-            tipPos: { x: c.x, y: c.y, z: c.z },
-            tipNormal: { x: c.nx, y: c.ny, z: c.nz },
-            modelId,
-            source: 'overhang',
-            // Treat the accumulated down-facing area as the island area so the
-            // existing priority/sizing logic scales trunk thickness sensibly.
-            islandAreaMm2: Math.min(c.area, spacing * spacing),
-            zHeight: c.z,
-            overhangAngleDeg: c.incDeg,
-            priority: 0,
-        });
+    for (const [key, pts] of columns) {
+        pts.sort((a, b) => a.z - b.z);
+        let clusterLow = pts[0];
+        let clusterArea = pts[0].area;
+        let prevZ = pts[0].z;
+        let layer = 0;
+        const flush = () => {
+            candidates.push({
+                id: `overhang-${modelId}-${key}-L${layer}`,
+                tipPos: { x: clusterLow.x, y: clusterLow.y, z: clusterLow.z },
+                tipNormal: { x: clusterLow.nx, y: clusterLow.ny, z: clusterLow.nz },
+                modelId,
+                source: 'overhang',
+                islandAreaMm2: Math.min(clusterArea, spacing * spacing),
+                zHeight: clusterLow.z,
+                overhangAngleDeg: clusterLow.incDeg,
+                priority: 0,
+            });
+            layer++;
+        };
+        for (let i = 1; i < pts.length; i++) {
+            if (pts[i].z - prevZ > LAYER_Z_GAP_MM) {
+                flush();
+                clusterLow = pts[i];
+                clusterArea = pts[i].area;
+            } else {
+                clusterArea += pts[i].area;
+            }
+            prevZ = pts[i].z;
+        }
+        flush();
     }
     return candidates;
 }

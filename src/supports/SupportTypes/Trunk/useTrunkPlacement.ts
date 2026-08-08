@@ -146,18 +146,18 @@ export function buildCavityStick(
     const hits = _cavityRaycaster.intersectObject(mesh, false);
     if (hits.length === 0) return null;
 
-    // Prefer a true "floor" hit (normal has meaningful +Z) so the bottom
-    // endpoint clings vertically down when possible. Only fall back to any
-    // below-tip hit (e.g. sidewall) if no floor-like surface is found.
+    // Use the FIRST (nearest) surface below the tip. The bridge segment from the
+    // tip to that hit is exactly the ray path, so it is guaranteed clear of the
+    // model. Preferring a deeper "floor" hit (as we used to) skips nearer
+    // surfaces — hair strands, sidewalls — and the bridge then passes straight
+    // through them, which reads as the support penetrating the model.
     const BELOW_EPS_MM = 0.1;
-    const FLOOR_Z_MIN = 0.35;
     const normalMatrix = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
 
     type Candidate = { hit: THREE.Intersection; normal: THREE.Vector3 };
     const MAX_HIT_SCAN = 64;
     let scanned = 0;
-    let firstBelowCandidate: Candidate | null = null;
-    let floorCandidate: Candidate | null = null;
+    let chosen: Candidate | null = null;
 
     for (const h of hits) {
         scanned += 1;
@@ -165,15 +165,10 @@ export function buildCavityStick(
         if (h.point.z >= tipPos.z - BELOW_EPS_MM) continue;
         if (!h.face) continue;
         const n = h.face.normal.clone().applyNormalMatrix(normalMatrix).normalize();
-        const candidate = { hit: h, normal: n };
-        if (!firstBelowCandidate) firstBelowCandidate = candidate;
-        if (n.z >= FLOOR_Z_MIN) {
-            floorCandidate = candidate;
-            break;
-        }
+        chosen = { hit: h, normal: n };
+        break; // nearest below-tip hit — no geometry between tip and here
     }
 
-    const chosen = floorCandidate ?? firstBelowCandidate;
     if (!chosen) return null;
 
     const bPos = { x: chosen.hit.point.x, y: chosen.hit.point.y, z: chosen.hit.point.z };
