@@ -126,6 +126,11 @@ export function buildCavityStick(
     tipNormal: { x: number; y: number; z: number },
     modelId: string,
     mesh: THREE.Mesh,
+    /** Minimum vertical span (mm) between tip and landing surface for the bridge
+     *  to be accepted. Below this, the stick holds no load and only scars both
+     *  surfaces, so we return null. Defaults to 0 (no gate) so manual placement
+     *  is unchanged; auto-support passes a real threshold. */
+    minZSpanMm = 0,
 ): (
     | { kind: 'stick'; supportData: SupportData; stick: ReturnType<typeof buildStick>['stick'] }
     | { kind: 'twig'; supportData: SupportData; twig: ReturnType<typeof buildTwig>['twig'] }
@@ -179,6 +184,12 @@ export function buildCavityStick(
     const dx = tipPos.x - bPos.x;
     const dy = tipPos.y - bPos.y;
     const dz = tipPos.z - bPos.z;
+
+    // Reject bridges that barely span any vertical distance: they carry no load
+    // and only mark both surfaces (auto-support on a die generated a swarm of
+    // these tiny model-to-model stubs). Manual placement passes minZSpanMm=0.
+    if (Math.abs(dz) < minZSpanMm) return null;
+
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
     const kind: 'twig' | 'stick' = dist > cutoff ? 'stick' : 'twig';
 

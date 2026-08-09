@@ -18,6 +18,7 @@ import type { SupportData } from '../../rendering/SupportBuilder';
 import { calculateStandardPlacement, type TrunkPlacementResult } from '../../PlacementLogic/StandardPlacement';
 import { calculateSmartPlacementV2 } from '../../PlacementLogic/Pathfinding';
 import { isShaftBlocked } from '../../PlacementLogic/CollisionAvoidance';
+import { isRootWithinPlate } from '../../plateBounds';
 import type { LimitationCode, WarningCode } from '../../types';
 import type { SnappedTrunkRouteResult, TrunkRouteResult } from './trunkRouteTypes';
 import { gridSnappedXYFromKey } from '../../PlacementLogic/Grid/gridMath';
@@ -356,6 +357,10 @@ export function buildEscapeTrunkData(input: TrunkBuildInput): TrunkBuildResult {
                 y: socketPos.y + dy * offset,
                 z: rootsTopZ,
             };
+            // Never anchor a support root off the build plate — it can't print,
+            // and the raft would stretch off-plate to reach it. Reject this tilt
+            // and let a shallower/other-yaw one (or plain rejection) win instead.
+            if (!isRootWithinPlate(shaftBottom.x, shaftBottom.y)) continue;
             if (isShaftBlocked(shaftBottom, socketPos, clearanceR, mesh)) continue;
 
             // Clear tilted lane found — author a single straight tilted shaft.

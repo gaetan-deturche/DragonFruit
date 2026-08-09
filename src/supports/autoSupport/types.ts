@@ -71,6 +71,11 @@ export interface AutoPlaceAnalytics {
     areaCoverage: number;
     /** Debug sizing info from the physics calculations. */
     sizingDebug?: SizingDebugInfo;
+    /** Per-candidate reject details + uncovered island info (diagnostics). */
+    debug?: {
+        rejects: Array<{ id: string; source: string; err: string; z: number; nz: number }>;
+        uncovered: Array<{ id: string; x: number; y: number; z: number; area: number }>;
+    };
 }
 
 /** Physics-based sizing debug data. */

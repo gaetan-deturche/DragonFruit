@@ -40,6 +40,14 @@ export interface AutomationBridgeHandlers {
     getActiveModelId: () => string | null;
     /** Current scanned + filtered islands for the active model. */
     getIslands: () => DetectedIsland[];
+    /** Current app tab/mode (e.g. 'prepare' | 'support' | 'analysis'). */
+    getMode?: () => string;
+    /** Switch app tab/mode — 'support' triggers the reactive island scan. */
+    setMode?: (mode: string) => void;
+    /** Whether an island scan is currently running. */
+    isScanning?: () => boolean;
+    /** Count of islands the UI considers unsupported (strict on-island check). */
+    getUnsupportedIslandCount?: () => number;
     /** Trigger a fresh island scan; resolves when done. */
     scanIslands?: () => Promise<void>;
     /** Remove all existing supports (reset). */
@@ -58,6 +66,8 @@ const RAD2DEG = 180 / Math.PI;
 type Command =
     | { id: number; cmd: 'ping' }
     | { id: number; cmd: 'getState' }
+    | { id: number; cmd: 'getMode' }
+    | { id: number; cmd: 'setMode'; args: { mode: string } }
     | { id: number; cmd: 'scanIslands' }
     | { id: number; cmd: 'clearSupports' }
     | { id: number; cmd: 'generateSupports'; args?: { settings?: Partial<AutoSupportSettings> } }
@@ -124,7 +134,19 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                         activeModelId: h.getActiveModelId(),
                         islandCount: islands.length,
                         supportCount: countSupports(),
+                        mode: h.getMode?.() ?? null,
+                        scanning: h.isScanning?.() ?? false,
+                        unsupportedIslands: h.getUnsupportedIslandCount?.() ?? null,
                     };
+                }
+
+                case 'getMode':
+                    return { mode: h.getMode?.() ?? null, scanning: h.isScanning?.() ?? false, islandCount: h.getIslands().length };
+
+                case 'setMode': {
+                    if (!h.setMode) throw new Error('setMode not wired');
+                    h.setMode(cmd.args.mode);
+                    return { mode: cmd.args.mode };
                 }
 
                 case 'scanIslands': {

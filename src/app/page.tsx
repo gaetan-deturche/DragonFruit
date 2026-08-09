@@ -219,6 +219,7 @@ import { IslandsPanel } from '@/components/controls/IslandsPanel';
 import { AutoSupportPanel, getAutoSupportBusy, subscribeAutoSupportBusy, autoSupportDrivingScan } from '@/components/controls/AutoSupportPanel';
 import { useAutomationBridge } from '@/automation/useAutomationBridge';
 import { getModelMesh } from '@/supports/autoSupport/meshStore';
+import { setPlateBoundsXY } from '@/supports/plateBounds';
 import { IslandOverlay } from '@/components/scene/IslandOverlay';
 import { useSupportInteractionManager } from '@/features/supports/useSupportInteractionManager';
 import { useUndoRedoHotkeys } from '@/hotkeys/useUndoRedoHotkeys';
@@ -6945,6 +6946,11 @@ export default function Home() {
   useAutomationBridge({
     getActiveModelId: () => scene.activeModelId ?? null,
     getIslands: () => islandsPoc.filteredIslands,
+    getMode: () => scene.mode,
+    setMode: (m) => scene.setMode(m as typeof scene.mode),
+    isScanning: () => islandsPoc.scanning,
+    scanIslands: async () => { await islandsPoc.onRunScan(); },
+    getUnsupportedIslandCount: () => islandsPoc.tableStats.allUnsupported,
     loadModel: async (path) => {
       const name = path.split(/[\\/]/).pop() || 'model.stl';
       const file = new File([], name, { lastModified: Date.now() });
@@ -7065,6 +7071,21 @@ export default function Home() {
     scene.view3dSettings.originMode,
     scene.view3dSettings.widthMm,
   ]);
+
+  // Feed the plate rectangle to support placement so no support root is ever
+  // anchored off-plate (e.g. an escape trunk tilting out from a tall overhang).
+  React.useEffect(() => {
+    if (!buildVolumeBounds) {
+      setPlateBoundsXY(null);
+      return;
+    }
+    setPlateBoundsXY({
+      minX: buildVolumeBounds.min.x,
+      maxX: buildVolumeBounds.max.x,
+      minY: buildVolumeBounds.min.y,
+      maxY: buildVolumeBounds.max.y,
+    });
+  }, [buildVolumeBounds]);
 
   const outsidePlateModelIds = React.useMemo(() => {
     if (!buildVolumeBounds) return [] as string[];

@@ -24,6 +24,16 @@ import { generateOverhangCandidates, generateLowestPointCandidates } from './ove
 
 const LOG_PREFIX = '[AutoSupport]';
 
+/**
+ * Minimum vertical span (mm) for an auto-placed model-to-model Stick/Twig to be
+ * accepted. Bridges shorter than this hold no real load — they only scar both
+ * surfaces (the die case, where overhangs sit a fraction of a mm above the
+ * surface below). Genuine trapped overhangs (bust hair over shoulders) span far
+ * more than this, so they are kept. Tune here if legitimate short bridges get
+ * dropped. Only affects auto-support; manual placement passes no threshold.
+ */
+const MIN_MODEL_TO_MODEL_Z_SPAN_MM = 3.0;
+
 // ---------------------------------------------------------------------------
 // History action type
 // ---------------------------------------------------------------------------
@@ -375,7 +385,7 @@ function placeOneCandidate(
     _settingsOverride: Partial<AutoSupportSettings> | undefined,
     modelCtx?: ModelSizingContext,
     totalArea?: number,
-): { kind: string; rejectedReason?: RejectReason; preset?: 'detail' | 'structure' | 'anchor'; entityId?: string; stickCount?: number } {
+): { kind: string; rejectedReason?: RejectReason; preset?: 'detail' | 'structure' | 'anchor'; entityId?: string; stickCount?: number; detail?: string } {
     const supportSettings = getSettings();
     const snapshot = getSnapshot();
     const mesh = getModelMesh(candidate.modelId) ?? undefined;
@@ -571,7 +581,17 @@ function placeOneCandidate(
         // Cavity fallback: if the trunk can't reach the build plate, try
         // bridging to a lower surface with a Stick (model-to-model).
         if (trunkResult.error === 'COLLISION_WITH_MODEL' && mesh) {
-            const cavityResult = buildCavityStick(tipPos, tipNormal, candidate.modelId, mesh);
+            // A model-to-model Stick/Twig is genuinely useful for a trapped
+            // overhang (e.g. hair strands caged above shoulders), but it marks
+            // BOTH surfaces it touches. When the vertical gap it bridges is tiny
+            // — the die case, where the overhang sits a fraction of a mm above
+            // the surface below — the stick holds nothing and just scars the
+            // print. Require a minimum vertical span so only load-bearing
+            // bridges survive; shorter ones return null and fall through to the
+            // escape trunk (reaches the plate) or a clean rejection.
+            const cavityResult = buildCavityStick(
+                tipPos, tipNormal, candidate.modelId, mesh, MIN_MODEL_TO_MODEL_Z_SPAN_MM,
+            );
             if (cavityResult) {
                 if (cavityResult.kind === 'stick') {
                     addStick(cavityResult.stick);
@@ -602,7 +622,7 @@ function placeOneCandidate(
             `Rejected ${candidate.id} (${candidate.source}): trunk build error "${trunkResult.error}" ` +
             `tip=(${tipPos.x.toFixed(1)},${tipPos.y.toFixed(1)},${tipPos.z.toFixed(1)}) ` +
             `normal=(${tipNormal.x.toFixed(2)},${tipNormal.y.toFixed(2)},${tipNormal.z.toFixed(2)})`);
-        return { kind: 'reject', rejectedReason: 'trunk_build_error', preset };
+        return { kind: 'reject', rejectedReason: 'trunk_build_error', preset, detail: trunkResult.error };
     }
 
     // Route through the standard grid placement engine.
@@ -871,6 +891,7 @@ export function runAutoPlace(
     // Analytics accumulators
     const presets = { detail: 0, structure: 0, anchor: 0 };
     const rejectionReasons: Record<string, number> = {};
+    const debugRejects: Array<{ id: string; source: string; err: string; z: number; nz: number }> = [];
 
     // Each support is sized for its OWN contact area only. Previously we summed
     // the areas of every candidate within GRIDLESS_MERGE_RADIUS_MM ("cluster
@@ -899,6 +920,13 @@ export function runAutoPlace(
                     if (result.rejectedReason) {
                         rejectionReasons[result.rejectedReason] = (rejectionReasons[result.rejectedReason] ?? 0) + 1;
                     }
+                    debugRejects.push({
+                        id: candidate.id,
+                        source: candidate.source,
+                        err: result.detail ?? result.rejectedReason ?? '?',
+                        z: round2(candidate.zHeight),
+                        nz: round2(candidate.tipNormal.z),
+                    });
                     break;
             }
             if (result.preset) presets[result.preset]++;
@@ -924,7 +952,15 @@ export function runAutoPlace(
     // ── Coverage analytics ────────────────────────────────────────
     const snapshot = getSnapshot();
     const supportedIds = new Set<string>();
-    const SUPPORT_COVERAGE_RADIUS_MM = 4.0;
+    // How close a support tip must be to an island to count it "covered" — and,
+    // via supportedIds below, which islands the leaf-fanning pass still targets.
+    // The UI marks an island supported only when a tip lands within ~0.3–0.6mm of
+    // it (tip radius) AND at nearly the same Z (annotateAndCountSupports). A loose
+    // 4mm here made the generator declare islands covered when a support merely
+    // passed nearby, so leaf-fanning skipped them and the UI then flagged them
+    // "unsupported". Keep this tight so every island that lacks an on-surface
+    // support gets a leaf fanned directly onto it (leaf tips land AT the island).
+    const SUPPORT_COVERAGE_RADIUS_MM = 0.6;
     const covR2 = SUPPORT_COVERAGE_RADIUS_MM * SUPPORT_COVERAGE_RADIUS_MM;
 
     // Collect all support tips from the post-placement snapshot.
@@ -1268,6 +1304,20 @@ export function runAutoPlace(
                 `Overhang coverage: ${overhangSupportsPlaced} additional branches placed for flat surfaces.`);
         }
     }
+
+    // ── Diagnostics: rejected candidates + still-uncovered islands ──────
+    analytics.debug = {
+        rejects: debugRejects,
+        uncovered: islands
+            .filter(i => !supportedIds.has(i.id))
+            .map(i => ({
+                id: i.id,
+                x: round2(i.contact.x),
+                y: round2(i.contact.y),
+                z: round2(i.contact.z),
+                area: round2(i.areaMm2 ?? 0),
+            })),
+    };
 
     // ------------------------------------------------------------------
     // 4. Auto-bracing + history
