@@ -12,6 +12,8 @@ on:
     paths-ignore:
       - "**.md"
       - "docs/**"
+  release:
+    types: [published]
 
 concurrency:
   group: build-installer-${{ github.ref }}
@@ -56,7 +58,7 @@ jobs:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
         run: npm run tauri:build -- --bundles nsis
 
-      - name: Upload installer
+      - name: Upload installer (workflow artifact)
         uses: actions/upload-artifact@v4
         with:
           name: DragonFruit-Windows-Installer
@@ -65,3 +67,14 @@ jobs:
             src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
           retention-days: 30
+
+      # On a published release, also attach the installer as a downloadable
+      # release asset so users get it from the Releases page, not just Actions.
+      - name: Attach installer to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            src-tauri/target/release/bundle/nsis/*.exe --clobber
