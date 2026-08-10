@@ -221,6 +221,7 @@ import { useAutomationBridge } from '@/automation/useAutomationBridge';
 import { getModelMesh } from '@/supports/autoSupport/meshStore';
 import { setPlateBoundsXY } from '@/supports/plateBounds';
 import { orientModelsIndependently } from '@/features/orientation/autoOrient';
+import { StartupUpdateChecker } from '@/features/updater/StartupUpdateChecker';
 import { IslandOverlay } from '@/components/scene/IslandOverlay';
 import { useSupportInteractionManager } from '@/features/supports/useSupportInteractionManager';
 import { useUndoRedoHotkeys } from '@/hotkeys/useUndoRedoHotkeys';
@@ -9785,6 +9786,9 @@ export default function Home() {
           printingSlicingBenchmark: printingSlicingBenchmark,
         })}
       </FloatingPanelStack>
+
+      {/* Checks for updates at startup (throttled) and shows a banner if one is available. */}
+      <StartupUpdateChecker />
 
       <div className="absolute inset-0 top-14 z-0 flex">
         <div
