@@ -1,17 +1,13 @@
 name: Build Windows Installer
 
-# Personal-fork CI: builds the Windows redistributable (NSIS + MSI) and attaches
-# it as a workflow artifact. Runs on every push to main and on manual dispatch.
+# Personal-fork CI: builds the Windows redistributable (NSIS + MSI). Runs only
+# when a release is published (i.e. on a version tag) or on manual dispatch —
+# NOT on every commit — and attaches the installer to the release.
 # The upstream org workflows were removed on this fork (they require org secrets
 # and only produced failing-build email noise).
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
   release:
     types: [published]
 
