@@ -33,7 +33,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcyNzlERUJGOEQwOTk2MDAKUldRQWxnbU52OTU1Y256cU9HenN6VUs0S055SXFuN08zNjVPNEJWNGdWaHpia2NKcyswSklGbXMK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3MUVENjlFMThGNTQxOUEKUldTYVFmVVludFlldHl3bXQrbWhiOFhQRnd3Qjc5MWQrUGpQbzY4MThGU2Y4V1Jqc0U0RGFtbXoK",
       "endpoints": [
         "https://github.com/gaetan-deturche/DragonFruit/releases/latest/download/latest.json"
       ],
