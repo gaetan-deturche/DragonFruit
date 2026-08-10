@@ -53,10 +53,14 @@ fn cached_update() -> &'static Mutex<Option<tauri_plugin_updater::Update>> {
 // Endpoint URLs per channel
 // ---------------------------------------------------------------------------
 
+// Personal fork: updates come from this fork's GitHub Releases. The
+// `releases/latest/download/<asset>` URL always resolves to the newest
+// (non-prerelease) release's asset, so CI just attaches `latest.json` there.
+// The fork ships a single release stream, so both channels point at it.
 const STABLE_ENDPOINT: &str =
-    "https://open-resin-alliance.github.io/DragonFruit/latest.json";
+    "https://github.com/gaetan-deturche/DragonFruit/releases/latest/download/latest.json";
 const DEV_ENDPOINT: &str =
-    "https://open-resin-alliance.github.io/DragonFruit/latest-dev.json";
+    "https://github.com/gaetan-deturche/DragonFruit/releases/latest/download/latest.json";
 
 fn endpoint_for_channel(channel: &str) -> &'static str {
     match channel {

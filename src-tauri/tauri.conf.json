@@ -33,9 +33,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU0NjE2N0VERDQ3RjYwMDcKUldRSFlIL1U3V2RoNVBnc0hoWnU5NnZSdkhSRys5OFFRVXpHNWhsd3ZwRGYwc1N1UkpLR3htWmkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcyNzlERUJGOEQwOTk2MDAKUldRQWxnbU52OTU1Y256cU9HenN6VUs0S055SXFuN08zNjVPNEJWNGdWaHpia2NKcyswSklGbXMK",
       "endpoints": [
-        "https://github.com/Open-Resin-Alliance/DragonFruit/releases/latest/download/latest.json"
+        "https://github.com/gaetan-deturche/DragonFruit/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

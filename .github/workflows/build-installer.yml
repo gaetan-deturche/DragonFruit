@@ -1,10 +1,10 @@
 name: Build Windows Installer
 
-# Personal-fork CI: builds the Windows redistributable (NSIS + MSI). Runs only
-# when a release is published (i.e. on a version tag) or on manual dispatch —
-# NOT on every commit — and attaches the installer to the release.
-# The upstream org workflows were removed on this fork (they require org secrets
-# and only produced failing-build email noise).
+# Personal-fork CI: builds the SIGNED Windows installer + updater manifest and
+# attaches them to the GitHub release. Runs only when a release is published
+# (i.e. on a version tag) or on manual dispatch — NOT on every commit.
+# The updater (src-tauri/src/updater_channel.rs + tauri.conf plugins.updater)
+# points at this fork's `releases/latest/download/latest.json`.
 
 on:
   workflow_dispatch:
@@ -20,6 +20,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # On a release, stamp the app version = release tag so the built installer
+      # and the updater manifest both report the new version (the updater compares
+      # the running app version against latest.json's version).
+      - name: Set version from release tag
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          V="${{ github.event.release.tag_name }}"; V="${V#v}"
+          node -e "for (const f of ['package.json','src-tauri/tauri.conf.json']) { const c=require('./'+f); c.version=process.argv[1]; require('fs').writeFileSync(f, JSON.stringify(c,null,2)+'\n'); } console.log('version ->', process.argv[1]);" "$V"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -40,18 +50,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # No TAURI_SIGNING_PRIVATE_KEY on a personal fork, so disable updater
-      # artifact creation (which requires signing). The installers themselves
-      # are unaffected. This edit is ephemeral to the CI checkout.
-      - name: Disable updater signing
-        run: node -e "const fs=require('fs');const f='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(f,'utf8'));c.bundle=c.bundle||{};c.bundle.createUpdaterArtifacts=false;fs.writeFileSync(f,JSON.stringify(c,null,2));console.log('createUpdaterArtifacts -> false');"
-
-      - name: Build installer
+      - name: Build signed installer
         env:
-          # Faster, more parallel build than the repo's max-optimization default
-          # (fat LTO + codegen-units=1). Negligible runtime impact for this app.
+          # Faster, more parallel build than the repo's max-optimization default.
           CARGO_PROFILE_RELEASE_LTO: thin
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          # Signs the updater artifact (.sig). tauri.conf createUpdaterArtifacts=true.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build -- --bundles nsis
 
       - name: Upload installer (workflow artifact)
@@ -60,17 +66,32 @@ jobs:
           name: DragonFruit-Windows-Installer
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.sig
           if-no-files-found: error
           retention-days: 30
 
-      # On a published release, also attach the installer as a downloadable
-      # release asset so users get it from the Releases page, not just Actions.
-      - name: Attach installer to release
+      # Attach the installer + its signature + a generated updater manifest
+      # (latest.json) to the release, so the in-app updater can find it at
+      # releases/latest/download/latest.json.
+      - name: Publish updater manifest + assets to release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            src-tauri/target/release/bundle/nsis/*.exe --clobber
+          set -euo pipefail
+          NSIS="src-tauri/target/release/bundle/nsis"
+          EXE=$(ls "$NSIS"/*-setup.exe | head -1)
+          SIG=$(ls "$NSIS"/*-setup.exe.sig | head -1)
+          NAME=$(basename "$EXE")
+          TAG="${{ github.event.release.tag_name }}"
+          VER="${TAG#v}"
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${NAME}"
+          node -e "
+            const fs=require('fs');
+            const sig=fs.readFileSync(process.argv[1],'utf8').trim();
+            const manifest={ version: process.argv[2], notes: 'DragonFruit '+process.argv[4], pub_date: new Date().toISOString(), platforms: { 'windows-x86_64': { signature: sig, url: process.argv[3] } } };
+            fs.writeFileSync('latest.json', JSON.stringify(manifest, null, 2));
+            console.log('latest.json ->', manifest.version, manifest.platforms['windows-x86_64'].url);
+          " "$SIG" "$VER" "$URL" "$TAG"
+          gh release upload "$TAG" "$EXE" "$SIG" latest.json --clobber
