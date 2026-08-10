@@ -15,6 +15,11 @@ concurrency:
   group: build-installer-${{ github.ref }}
   cancel-in-progress: true
 
+# The "Publish updater manifest + assets to release" step uploads assets to the
+# release via GITHUB_TOKEN, which needs write access to repo contents (releases).
+permissions:
+  contents: write
+
 jobs:
   windows-installer:
     runs-on: windows-latest
