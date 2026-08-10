@@ -8,6 +8,8 @@ import { MeshSmoothingSettingsPanel } from '@/features/mesh-smoothing/MeshSmooth
 import { HollowingPanel } from '@/features/hollowing';
 import { HolePunchPanel } from '@/features/hole-punching/HolePunchPanel';
 import { OrganicCutPanel, type OrganicCutSession } from '@/features/organicCut';
+import { getModelMesh } from '@/supports/autoSupport/meshStore';
+import { orientModelsIndependently } from '@/features/orientation/autoOrient';
 import type { useSceneCollectionManager } from '@/features/scene/useSceneCollectionManager';
 import type { useTransformManager } from '@/features/transform/useTransformManager';
 import type { useHollowingManager } from '@/features/hollowing/useHollowingManager';
@@ -239,6 +241,15 @@ export function PreparePanelStack({
           }}
           onResetRotation={transformMgr.transformHook.resetRotation}
           onRotationComplete={handleRotationComplete}
+          onAutoOrient={() => {
+            // Orient EACH model independently to its own optimum, then apply all
+            // transforms at once (updateModelTransforms handles history + support
+            // invalidation, with undo). Never rotate the whole set as one group.
+            const updates = orientModelsIndependently(scene.models, getModelMesh, transformMgr.liftDistance ?? 0);
+            if (updates.length > 0) {
+              scene.updateModelTransforms(updates.map((u) => ({ id: u.id, transform: u.transform })));
+            }
+          }}
           scale={transformMgr.transform.scale}
           onScaleChange={(x, y, z) => {
             const current = transformMgr.transform.scale;

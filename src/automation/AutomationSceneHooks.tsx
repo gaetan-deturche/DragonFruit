@@ -22,6 +22,7 @@ interface DfAutomationImpl {
     captureViewport: () => string | null;
     setView: (preset: ViewPreset) => void;
     fit: () => void;
+    getControlsState: () => { enabled?: boolean; enableRotate?: boolean; enablePan?: boolean; enableZoom?: boolean } | null;
 }
 
 declare global {
@@ -61,40 +62,49 @@ export function AutomationSceneHooks(): null {
     const camera = useThree((s) => s.camera);
     const controls = useThree((s) => s.controls) as { target?: THREE.Vector3; update?: () => void } | null;
 
-    // Rebuilt every render so hot-reloaded logic is picked up by the stable
-    // window wrappers below.
-    const implRef = useRef<DfAutomationImpl>(null!);
-    implRef.current = {
-        captureViewport: () => {
-            try {
-                gl.render(scene, camera);
-                return gl.domElement.toDataURL('image/png');
-            } catch {
-                return null;
-            }
-        },
-        setView: (preset) => {
-            const box = modelBounds();
-            const target = box.isEmpty() ? new THREE.Vector3(0, 0, 0) : box.getCenter(new THREE.Vector3());
-            const radius = box.isEmpty() ? 40 : Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1);
-            const d = VIEW_DIRS[preset] ?? VIEW_DIRS.iso;
-            frameCamera(camera, controls, new THREE.Vector3(d[0], d[1], d[2]), target, radius);
-        },
-        fit: () => {
-            const box = modelBounds();
-            const target = box.isEmpty() ? new THREE.Vector3(0, 0, 0) : box.getCenter(new THREE.Vector3());
-            const radius = box.isEmpty() ? 40 : Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1);
-            const dir = camera.position.clone().sub(controls?.target ?? target);
-            if (dir.lengthSq() < 1e-6) dir.set(1, -1, 0.8);
-            frameCamera(camera, controls, dir, target, radius);
-        },
-    };
+    // Rebuilt after every commit (no dep array) so hot-reloaded logic is picked
+    // up by the stable window wrappers below — assigned in an effect, never
+    // during render (which react-hooks/refs correctly forbids).
+    const implRef = useRef<DfAutomationImpl | null>(null);
+    useEffect(() => {
+        implRef.current = {
+            captureViewport: () => {
+                try {
+                    gl.render(scene, camera);
+                    return gl.domElement.toDataURL('image/png');
+                } catch {
+                    return null;
+                }
+            },
+            setView: (preset) => {
+                const box = modelBounds();
+                const target = box.isEmpty() ? new THREE.Vector3(0, 0, 0) : box.getCenter(new THREE.Vector3());
+                const radius = box.isEmpty() ? 40 : Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1);
+                const d = VIEW_DIRS[preset] ?? VIEW_DIRS.iso;
+                frameCamera(camera, controls, new THREE.Vector3(d[0], d[1], d[2]), target, radius);
+            },
+            fit: () => {
+                const box = modelBounds();
+                const target = box.isEmpty() ? new THREE.Vector3(0, 0, 0) : box.getCenter(new THREE.Vector3());
+                const radius = box.isEmpty() ? 40 : Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1);
+                const dir = camera.position.clone().sub(controls?.target ?? target);
+                if (dir.lengthSq() < 1e-6) dir.set(1, -1, 0.8);
+                frameCamera(camera, controls, dir, target, radius);
+            },
+            getControlsState: () => {
+                const c = controls as unknown as { enabled?: boolean; enableRotate?: boolean; enablePan?: boolean; enableZoom?: boolean } | null;
+                if (!c) return null;
+                return { enabled: c.enabled, enableRotate: c.enableRotate, enablePan: c.enablePan, enableZoom: c.enableZoom };
+            },
+        };
+    });
 
     useEffect(() => {
         window.__dfAutomation = {
-            captureViewport: () => implRef.current.captureViewport(),
-            setView: (p) => implRef.current.setView(p),
-            fit: () => implRef.current.fit(),
+            captureViewport: () => implRef.current?.captureViewport() ?? null,
+            setView: (p) => implRef.current?.setView(p),
+            fit: () => implRef.current?.fit(),
+            getControlsState: () => implRef.current?.getControlsState() ?? null,
         };
         return () => {
             if (window.__dfAutomation) delete window.__dfAutomation;

@@ -48,6 +48,10 @@ export interface AutomationBridgeHandlers {
     isScanning?: () => boolean;
     /** Count of islands the UI considers unsupported (strict on-island check). */
     getUnsupportedIslandCount?: () => number;
+    /** Compute + apply an optimized build orientation; returns the chosen result. */
+    autoOrient?: (opts?: { overhangAngleDeg?: number; heightWeight?: number; candidateCount?: number }) => unknown;
+    /** Remove all models from the scene (for scripted multi-model testing). */
+    clearModels?: () => Promise<void>;
     /** Trigger a fresh island scan; resolves when done. */
     scanIslands?: () => Promise<void>;
     /** Remove all existing supports (reset). */
@@ -68,6 +72,8 @@ type Command =
     | { id: number; cmd: 'getState' }
     | { id: number; cmd: 'getMode' }
     | { id: number; cmd: 'setMode'; args: { mode: string } }
+    | { id: number; cmd: 'autoOrient'; args?: { overhangAngleDeg?: number; heightWeight?: number; candidateCount?: number } }
+    | { id: number; cmd: 'clearModels' }
     | { id: number; cmd: 'scanIslands' }
     | { id: number; cmd: 'clearSupports' }
     | { id: number; cmd: 'generateSupports'; args?: { settings?: Partial<AutoSupportSettings> } }
@@ -82,7 +88,8 @@ type Command =
     | { id: number; cmd: 'resetTransform' }
     | { id: number; cmd: 'screenshot' }
     | { id: number; cmd: 'setView'; args: { preset: 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso' } }
-    | { id: number; cmd: 'fitView' };
+    | { id: number; cmd: 'fitView' }
+    | { id: number; cmd: 'getControlsState' };
 
 const DEFAULT_URL = 'ws://127.0.0.1:8791';
 const RECONNECT_MS = 2000;
@@ -100,8 +107,12 @@ function countSupports(): number {
 
 export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
     // Keep the latest handlers without re-opening the socket every render.
+    // Updated in an effect (not during render, which react-hooks/refs forbids);
+    // WS messages are async so the ref is always current by the time one lands.
     const ref = useRef(handlers);
-    ref.current = handlers;
+    useEffect(() => {
+        ref.current = handlers;
+    });
 
     useEffect(() => {
         const enabled =
@@ -147,6 +158,17 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                     if (!h.setMode) throw new Error('setMode not wired');
                     h.setMode(cmd.args.mode);
                     return { mode: cmd.args.mode };
+                }
+
+                case 'autoOrient': {
+                    if (!h.autoOrient) throw new Error('autoOrient not wired');
+                    return h.autoOrient(cmd.args);
+                }
+
+                case 'clearModels': {
+                    if (!h.clearModels) throw new Error('clearModels not wired');
+                    await h.clearModels();
+                    return { cleared: true };
                 }
 
                 case 'scanIslands': {
@@ -269,6 +291,11 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                     if (!window.__dfAutomation) throw new Error('scene camera not ready');
                     window.__dfAutomation.fit();
                     return { ok: true };
+                }
+
+                case 'getControlsState': {
+                    if (!window.__dfAutomation?.getControlsState) throw new Error('scene camera not ready');
+                    return window.__dfAutomation.getControlsState();
                 }
 
                 default:

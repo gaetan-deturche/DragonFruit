@@ -58,7 +58,7 @@ import { useCurveInteractionState } from '@/supports/Curves/curveInteractionStat
 import { getSettings, subscribeToSettings } from '@/supports/Settings';
 import { DEFAULT_TIP_CONTACT_DIAMETER_MM } from '@/supports/Settings/defaults';
 import type { LoadedModel } from '@/features/scene/useSceneCollectionManager';
-import { CameraFocusHotkeyController, CameraHomeResetController, CameraIntroController, SpaceMouseController, useStlLoadCameraIntro } from '@/components/scene/camera';
+import { CameraControlsWatchdog, CameraFocusHotkeyController, CameraHomeResetController, CameraIntroController, SpaceMouseController, useStlLoadCameraIntro } from '@/components/scene/camera';
 import { CameraFocusController } from '@/components/scene/CameraFocusController';
 
 import { PickingStateSyncer } from '../PickingStateSyncer';
@@ -6773,6 +6773,7 @@ export function SceneCanvas({
           homeFovDeg={defaultCamera.fov}
           onComplete={setCameraHomeResetCompletedRunId}
         />
+        <CameraControlsWatchdog />
         <CameraModeEntryFramingController
           runId={modeEntryFramingRunId}
           restoreRunId={modeExitRestoreRunId}

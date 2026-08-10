@@ -220,6 +220,7 @@ import { AutoSupportPanel, getAutoSupportBusy, subscribeAutoSupportBusy, autoSup
 import { useAutomationBridge } from '@/automation/useAutomationBridge';
 import { getModelMesh } from '@/supports/autoSupport/meshStore';
 import { setPlateBoundsXY } from '@/supports/plateBounds';
+import { orientModelsIndependently } from '@/features/orientation/autoOrient';
 import { IslandOverlay } from '@/components/scene/IslandOverlay';
 import { useSupportInteractionManager } from '@/features/supports/useSupportInteractionManager';
 import { useUndoRedoHotkeys } from '@/hotkeys/useUndoRedoHotkeys';
@@ -6951,6 +6952,15 @@ export default function Home() {
     isScanning: () => islandsPoc.scanning,
     scanIslands: async () => { await islandsPoc.onRunScan(); },
     getUnsupportedIslandCount: () => islandsPoc.tableStats.allUnsupported,
+    clearModels: async () => { await scene.deleteModels(scene.models.map((m) => m.id)); },
+    autoOrient: (opts) => {
+      // Orient EACH model independently (never the whole set as one group).
+      const updates = orientModelsIndependently(scene.models, getModelMesh, transformMgr.liftDistance ?? 0, opts);
+      if (updates.length > 0) {
+        scene.updateModelTransforms(updates.map((u) => ({ id: u.id, transform: u.transform })));
+      }
+      return updates.map((u) => ({ id: u.id, ...u.result }));
+    },
     loadModel: async (path) => {
       const name = path.split(/[\\/]/).pop() || 'model.stl';
       const file = new File([], name, { lastModified: Date.now() });
