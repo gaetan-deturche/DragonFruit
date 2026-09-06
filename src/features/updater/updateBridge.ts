@@ -132,7 +132,11 @@ export async function downloadAndInstall(
     await invoke('perform_update');
     await relaunch();
     return true;
-  } catch {
+  } catch (err) {
+    // Was swallowed silently, which is why "Update Failed" never said WHY.
+    // Surface the real reason (signature verify / download / NSIS install) —
+    // console.error is routed into the Rust log (dragonfruit.log).
+    console.error('[updater] perform_update/relaunch failed:', err);
     return false;
   }
 }

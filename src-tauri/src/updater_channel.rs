@@ -200,8 +200,15 @@ pub async fn perform_update(
             },
         )
         .await
-        .map_err(|e| format!("Update failed: {e}"))?;
+        .map_err(|e| {
+            // Log the REAL reason (signature verification / download / NSIS
+            // install) — the frontend used to swallow this into a generic
+            // "Update Failed" with no detail.
+            warn!("[updater] perform_update (download_and_install) failed: {e}");
+            format!("Update failed: {e}")
+        })?;
 
+    info!("[updater] perform_update: download_and_install completed");
     Ok("Update installed successfully".into())
 }
 
