@@ -6942,6 +6942,12 @@ export default function Home() {
     activeTab: scene.mode,
   });
 
+  // Bumped after a bridge-driven auto-orient so the collision-aware arrange runs
+  // once the oriented transforms have committed to scene state (mirrors the UI
+  // button path in PreparePanelStack). See the consuming effect below, placed
+  // after handleAutoArrangeModels is defined.
+  const [bridgeAutoOrientArrangeNonce, setBridgeAutoOrientArrangeNonce] = React.useState(0);
+
   // Automation bridge — lets the DragonFruit MCP server drive auto-support and
   // model placement for scripted testing (dev/automation builds only; no-op
   // otherwise).
@@ -6959,6 +6965,11 @@ export default function Home() {
       const updates = orientModelsIndependently(scene.models, getModelMesh, transformMgr.liftDistance ?? 0, opts);
       if (updates.length > 0) {
         scene.updateModelTransforms(updates.map((u) => ({ id: u.id, transform: u.transform })));
+        // Re-orienting changes each footprint → parts can now overlap in XY.
+        // Trigger the collision-aware arrange once the transforms have committed.
+        if (updates.length > 1) {
+          setBridgeAutoOrientArrangeNonce((n) => n + 1);
+        }
       }
       return updates.map((u) => ({ id: u.id, ...u.result }));
     },
@@ -7599,6 +7610,18 @@ export default function Home() {
     handleConfirmDuplicate,
     handleFillPlateDuplicate,
   } = arrange;
+
+  // Bridge-driven auto-orient (see the autoOrient command above) re-packs the
+  // models collision-free once the oriented transforms have committed. A ref
+  // holds the latest arrange handler so this effect depends only on the nonce.
+  const bridgeAutoArrangeAllRef = React.useRef(handleAutoArrangeModels);
+  React.useEffect(() => {
+    bridgeAutoArrangeAllRef.current = handleAutoArrangeModels;
+  });
+  React.useEffect(() => {
+    if (bridgeAutoOrientArrangeNonce === 0) return;
+    void bridgeAutoArrangeAllRef.current('all');
+  }, [bridgeAutoOrientArrangeNonce]);
 
   const finalizeMirrorSessionRef = React.useRef<() => void>(() => {});
   const setTransformModeWithMirrorFinalize = React.useCallback((nextMode: TransformMode) => {

@@ -179,6 +179,25 @@ export function PreparePanelStack({
     isDuplicating,
     activeArrangeOperation,
   } = arrange;
+
+  // Auto-orient re-orients each model independently, which changes every
+  // model's XY footprint — parts that were spaced out before can now overlap.
+  // So after the oriented transforms COMMIT to scene state, re-run the existing
+  // collision-aware auto-arrange. It must run post-commit (not chained
+  // synchronously) because updateModelTransforms sets state, and the arrange
+  // handler reads the current `scene.models` snapshot. A ref holds the latest
+  // handler so the trigger effect can depend only on the nonce (otherwise it
+  // would re-fire on every unrelated re-render that recreates the callback).
+  const [autoOrientArrangeNonce, setAutoOrientArrangeNonce] = React.useState(0);
+  const autoArrangeAllRef = React.useRef(handleAutoArrangeModels);
+  React.useEffect(() => {
+    autoArrangeAllRef.current = handleAutoArrangeModels;
+  });
+  React.useEffect(() => {
+    if (autoOrientArrangeNonce === 0) return;
+    void autoArrangeAllRef.current('all');
+  }, [autoOrientArrangeNonce]);
+
   return (
     <>
       <ModelManagerPanel
@@ -248,6 +267,12 @@ export function PreparePanelStack({
             const updates = orientModelsIndependently(scene.models, getModelMesh, transformMgr.liftDistance ?? 0);
             if (updates.length > 0) {
               scene.updateModelTransforms(updates.map((u) => ({ id: u.id, transform: u.transform })));
+              // Re-orienting changes each model's footprint, so previously
+              // spaced-out parts can now overlap. Re-pack them collision-free
+              // once the new transforms have committed (see the nonce effect).
+              if (updates.length > 1) {
+                setAutoOrientArrangeNonce((n) => n + 1);
+              }
             }
           }}
           scale={transformMgr.transform.scale}

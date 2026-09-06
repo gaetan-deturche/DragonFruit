@@ -19,6 +19,16 @@ import * as THREE from 'three';
  *
  * Everything is computed in the mesh's LOCAL geometry frame, so the result is an
  * ABSOLUTE orientation independent of the model's current transform.
+ *
+ * KNOWN LIMITATION (character models): the cost is geometry-only and has no notion
+ * of a COSMETIC face. It minimizes total down-facing (support) area, so for a bust
+ * it can pick a "face-down / diving" pose when that exposes marginally less overhang
+ * than face-up — burying the face in supports. There is no purely-geometric fix:
+ * distinguishing "the face" needs extra information (a user-marked front face, a
+ * max-tilt/keep-upright preference, or a saliency model). By product decision this
+ * stays best-effort — auto-orient targets functional/technical parts; character
+ * models may need a manual nudge afterwards. The suction-cup term below still helps
+ * the common flat-based-part case (see contactSuctionWeight).
  */
 
 export interface AutoOrientOptions {
@@ -38,6 +48,21 @@ export interface AutoOrientOptions {
     suctionWeight?: number;
     /** Penalty per mm² of near-flat UP-face (resin pool that can't drain). */
     poolWeight?: number;
+    // ── plate-contact suction cup (why humans TILT busts / flat-based parts) ──
+    /** Weight of the plate-contact suction penalty. Unlike `suctionWeight` this
+     *  grows with area² (see `contactRefAreaMm2`), so a LARGE flat face resting
+     *  flat on the plate — the worst peel-force suction cup — is punished far
+     *  more than the same area split into small distributed feet. This is what
+     *  makes the optimizer tilt a bust off its flat base. */
+    contactSuctionWeight?: number;
+    /** Thickness (mm) of the band above the lowest point that counts as resting
+     *  on the plate. A tiny tilt lifts most of a flat face out of this band,
+     *  which is exactly why tilting escapes the suction penalty. */
+    contactBandMm?: number;
+    /** Reference area (mm²) for the super-linear contact penalty: contact area
+     *  equal to this contributes ~1× its area; double the area → ~4×. Fixed
+     *  (not model-relative) because peel force scales with absolute flat area. */
+    contactRefAreaMm2?: number;
 }
 
 export interface AutoOrientResult {
@@ -53,6 +78,9 @@ export interface AutoOrientResult {
     suctionAreaMm2: number;
     /** Near-flat up-facing area (resin-pool risk) at the chosen orientation. */
     poolAreaMm2: number;
+    /** Near-flat down-facing area actually resting on the plate (the plate
+     *  suction-cup patch) at the chosen orientation. */
+    contactAreaMm2: number;
     /** World Z of the lowest vertex once the rotation is applied at unit scale
      *  with the model origin at Z=0. Drop a model to sit `lift` mm above the
      *  plate with:  position.z = lift - scale * restZOffsetMm. */
@@ -80,12 +108,18 @@ export interface ModelOrientationUpdate {
 
 /**
  * Orient EACH model independently to its own optimal build orientation. Every
- * mesh is analysed on its own geometry and rotated + dropped to the plate in
- * place (XY kept, so models don't pile onto each other). The caller applies the
- * returned transforms — e.g. via `scene.updateModelTransforms(...)`.
+ * mesh is analysed on its own geometry and rotated + dropped to the plate; the
+ * model's XY CENTER is preserved. The caller applies the returned transforms —
+ * e.g. via `scene.updateModelTransforms(...)`.
  *
  * This is the correct multi-model behaviour: never rotate the whole set as one
  * rigid group (that would only suit one part and drag the others off-plate).
+ *
+ * NOTE: preserving each XY center does NOT prevent inter-model collisions —
+ * re-orienting changes every model's footprint, so parts that were spaced out
+ * can end up overlapping. For >1 model the caller must follow this with a
+ * collision-aware auto-arrange pass (the arrange packer repositions on XY using
+ * the post-orientation footprints).
  */
 export function orientModelsIndependently(
     models: OrientableModel[],
@@ -152,6 +186,9 @@ export function computeAutoOrientation(
     const cosFlat = Math.cos(((opts.flatAngleDeg ?? 20) * Math.PI) / 180);
     const wSuction = opts.suctionWeight ?? 3;
     const wPool = opts.poolWeight ?? 1;
+    const wContact = opts.contactSuctionWeight ?? 6;
+    const contactBand = opts.contactBandMm ?? 0.8;
+    const contactRef = Math.max(1, opts.contactRefAreaMm2 ?? 150);
     const maxTris = opts.maxTriangles ?? 120000;
     const stride = Math.max(1, Math.ceil(triCount / maxTris));
 
@@ -192,7 +229,7 @@ export function computeAutoOrientation(
 
     let bestCost = Infinity;
     let bestD: [number, number, number] = [0, 0, -1];
-    let bestSup = 0, bestH = 0, bestSuction = 0, bestPool = 0;
+    let bestSup = 0, bestH = 0, bestSuction = 0, bestPool = 0, bestContact = 0;
     const invRange = 1 / Math.max(1e-6, 1 - cosT);
 
     for (const d of cands) {
@@ -211,10 +248,25 @@ export function computeAutoOrientation(
             else if (ndotd < -cosFlat) pool += area[i];
         }
         const height = maxP - minP;
-        const cost = sup + wHeight * height + wSuction * suction + wPool * pool;
+        // Plate-contact suction cup: near-flat down-facing area sitting within a
+        // thin band above the lowest point — a big flat face resting flat on the
+        // plate. Needs minP, hence a second pass. Penalized super-linearly
+        // (area²) so a large flat base is far costlier than distributed feet,
+        // which is what tilts a bust off its base without over-tilting small
+        // flat parts. A slight tilt lifts the face out of the band → cheap.
+        const contactCut = minP + contactBand;
+        let contactArea = 0;
+        for (let i = 0; i < M; i++) {
+            const ndotd = nx[i] * dx + ny[i] * dy + nz[i] * dz;
+            if (ndotd <= cosFlat) continue;
+            const p = cx[i] * dx + cy[i] * dy + cz[i] * dz;
+            if (p <= contactCut) contactArea += area[i];
+        }
+        const contactPenalty = wContact * contactArea * contactArea / contactRef;
+        const cost = sup + wHeight * height + wSuction * suction + wPool * pool + contactPenalty;
         if (cost < bestCost) {
             bestCost = cost; bestD = d; bestSup = sup; bestH = height;
-            bestSuction = suction; bestPool = pool;
+            bestSuction = suction; bestPool = pool; bestContact = contactArea;
         }
     }
 
@@ -243,6 +295,7 @@ export function computeAutoOrientation(
         heightMm: bestH,
         suctionAreaMm2: bestSuction,
         poolAreaMm2: bestPool,
+        contactAreaMm2: bestContact,
         restZOffsetMm,
         candidatesEvaluated: cands.length,
         trianglesEvaluated: M,
