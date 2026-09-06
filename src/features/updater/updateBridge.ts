@@ -82,6 +82,15 @@ export async function fetchUpdateInfo(
   if (!isTauriAvailable()) {
     return null;
   }
+  // Never report updates in a dev build. `next dev` runs the newest CODE but
+  // keeps a stale version NUMBER (the release tag only stamps it in CI), so a
+  // dev app would perpetually see the latest release as an update and offer to
+  // replace itself with an installed build. This is the single choke point for
+  // every update check (StartupUpdateChecker AND GlobalUpdateIndicator both call
+  // it), so gating here covers all of them. Production installs still check.
+  if (process.env.NODE_ENV !== 'production') {
+    return null;
+  }
   console.log('[updater] fetchUpdateInfo called, channel:', channel ?? 'null (Rust default)');
   try {
     const result = await invoke<{

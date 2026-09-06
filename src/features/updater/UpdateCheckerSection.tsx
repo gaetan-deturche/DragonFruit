@@ -230,7 +230,9 @@ function AvailableState({
 
         <button
           onClick={async () => {
-            const url = `https://github.com/Open-Resin-Alliance/DragonFruit/releases/tag/v${info.version}`;
+            // This fork ships its own releases + updater feed, so "View on GitHub"
+            // must point at the fork's release page, not upstream's.
+            const url = `https://github.com/gaetan-deturche/DragonFruit/releases/tag/v${info.version}`;
             try {
               const { invoke } = await import('@tauri-apps/api/core');
               await invoke('open_external_url', { url });
