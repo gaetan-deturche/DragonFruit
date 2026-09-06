@@ -24,7 +24,14 @@ jobs:
   windows-installer:
     runs-on: windows-latest
     steps:
+      # submodules: recursive is REQUIRED — the printer plugins (plugins/anycubic,
+      # etc.) are git submodules that define each printer's slicing format + encoder
+      # (e.g. Anycubic AFF/pmx2). Without them, generate:plugin-registry builds an
+      # app with no Anycubic plugin: exports fall back to ".aff" and pmx2 slicing
+      # hangs. Dev works because submodules are checked out locally.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       # On a release, stamp the app version = release tag so the built installer
       # and the updater manifest both report the new version (the updater compares
