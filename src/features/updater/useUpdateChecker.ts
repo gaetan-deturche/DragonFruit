@@ -105,6 +105,11 @@ export function useUpdateChecker() {
 
   // Auto-check once the channel is loaded from disk and enough time has passed.
   useEffect(() => {
+    // Never auto-nag in a dev build: `next dev` runs the newest CODE but keeps a
+    // stale version NUMBER (the release tag only stamps the version in CI), so a
+    // dev app would perpetually "see" the latest release as an update and offer
+    // to replace itself with an installed build. Production installs still check.
+    if (process.env.NODE_ENV !== 'production') return;
     if (!autoCheckEnabled || !channelLoaded) return;
 
     const lastCheck = (() => {

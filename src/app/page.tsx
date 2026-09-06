@@ -6942,11 +6942,13 @@ export default function Home() {
     activeTab: scene.mode,
   });
 
-  // Bumped after a bridge-driven auto-orient so the collision-aware arrange runs
-  // once the oriented transforms have committed to scene state (mirrors the UI
-  // button path in PreparePanelStack). See the consuming effect below, placed
-  // after handleAutoArrangeModels is defined.
-  const [bridgeAutoOrientArrangeNonce, setBridgeAutoOrientArrangeNonce] = React.useState(0);
+  // Bumped after an auto-orient moved >1 model — by BOTH the bridge autoOrient
+  // command (below) and the UI button (PreparePanelStack, via its
+  // onAutoOrientArrange prop) — so the collision-aware arrange runs once the
+  // oriented transforms have committed to scene state. This lives in Home (not
+  // PreparePanelStack) because that panel is invoked inline and must stay
+  // hook-free. See the consuming effect below (after handleAutoArrangeModels).
+  const [autoOrientArrangeNonce, setAutoOrientArrangeNonce] = React.useState(0);
 
   // Automation bridge — lets the DragonFruit MCP server drive auto-support and
   // model placement for scripted testing (dev/automation builds only; no-op
@@ -6968,7 +6970,7 @@ export default function Home() {
         // Re-orienting changes each footprint → parts can now overlap in XY.
         // Trigger the collision-aware arrange once the transforms have committed.
         if (updates.length > 1) {
-          setBridgeAutoOrientArrangeNonce((n) => n + 1);
+          setAutoOrientArrangeNonce((n) => n + 1);
         }
       }
       return updates.map((u) => ({ id: u.id, ...u.result }));
@@ -7611,17 +7613,17 @@ export default function Home() {
     handleFillPlateDuplicate,
   } = arrange;
 
-  // Bridge-driven auto-orient (see the autoOrient command above) re-packs the
-  // models collision-free once the oriented transforms have committed. A ref
-  // holds the latest arrange handler so this effect depends only on the nonce.
-  const bridgeAutoArrangeAllRef = React.useRef(handleAutoArrangeModels);
+  // Auto-orient (bridge command OR UI button) re-packs the models collision-free
+  // once the oriented transforms have committed. A ref holds the latest arrange
+  // handler so this effect depends only on the nonce.
+  const autoArrangeAllRef = React.useRef(handleAutoArrangeModels);
   React.useEffect(() => {
-    bridgeAutoArrangeAllRef.current = handleAutoArrangeModels;
+    autoArrangeAllRef.current = handleAutoArrangeModels;
   });
   React.useEffect(() => {
-    if (bridgeAutoOrientArrangeNonce === 0) return;
-    void bridgeAutoArrangeAllRef.current('all');
-  }, [bridgeAutoOrientArrangeNonce]);
+    if (autoOrientArrangeNonce === 0) return;
+    void autoArrangeAllRef.current('all');
+  }, [autoOrientArrangeNonce]);
 
   const finalizeMirrorSessionRef = React.useRef<() => void>(() => {});
   const setTransformModeWithMirrorFinalize = React.useCallback((nextMode: TransformMode) => {
@@ -9656,6 +9658,7 @@ export default function Home() {
               holePunch: holePunch,
               arrange: arrange,
               organicCut: organicCut,
+              onAutoOrientArrange: () => setAutoOrientArrangeNonce((n) => n + 1),
               outsidePlateModelIds: outsidePlateModelIds,
               handleModelSelection: handleModelSelection,
               handleModelRangeSelection: handleModelRangeSelection,

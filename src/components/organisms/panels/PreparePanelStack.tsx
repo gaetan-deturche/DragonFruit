@@ -57,6 +57,11 @@ export type PreparePanelStackProps = {
 
   arrangeSpacingMm: number;
   setArrangeSpacingMm: (value: number) => void;
+
+  /** Called after a UI auto-orient moved >1 model, so Home can re-pack them
+   *  collision-free once the transforms have committed. Kept in Home (not here)
+   *  because this component must stay hook-free (invoked inline). */
+  onAutoOrientArrange: () => void;
 };
 
 /** PREPARE-mode floating panel group: model manager, transform/smoothing/hollowing/arrange tools. */
@@ -96,6 +101,7 @@ export function PreparePanelStack({
   hasCavityGeometry,
   arrangeSpacingMm,
   setArrangeSpacingMm,
+  onAutoOrientArrange,
 }: PreparePanelStackProps) {
   // Invoked inline by Home (not as <JSX/>) so FloatingPanelStack can flatten these keyed panels as direct children for its layout-profile positioning. 'use no memo' keeps React Compiler from injecting a useMemoCache hook (the conditional inline call must stay hook-free).
   'use no memo';
@@ -180,23 +186,12 @@ export function PreparePanelStack({
     activeArrangeOperation,
   } = arrange;
 
-  // Auto-orient re-orients each model independently, which changes every
-  // model's XY footprint — parts that were spaced out before can now overlap.
-  // So after the oriented transforms COMMIT to scene state, re-run the existing
-  // collision-aware auto-arrange. It must run post-commit (not chained
-  // synchronously) because updateModelTransforms sets state, and the arrange
-  // handler reads the current `scene.models` snapshot. A ref holds the latest
-  // handler so the trigger effect can depend only on the nonce (otherwise it
-  // would re-fire on every unrelated re-render that recreates the callback).
-  const [autoOrientArrangeNonce, setAutoOrientArrangeNonce] = React.useState(0);
-  const autoArrangeAllRef = React.useRef(handleAutoArrangeModels);
-  React.useEffect(() => {
-    autoArrangeAllRef.current = handleAutoArrangeModels;
-  });
-  React.useEffect(() => {
-    if (autoOrientArrangeNonce === 0) return;
-    void autoArrangeAllRef.current('all');
-  }, [autoOrientArrangeNonce]);
+  // NOTE: this component is invoked inline by Home as a plain function (see the
+  // 'use no memo' note above), so it MUST stay hook-free — any hook here runs in
+  // Home's hook sequence and vanishes when Home stops calling it (mode switch),
+  // crashing with "Rendered fewer hooks than expected". The post-orient
+  // collision-arrange therefore lives in Home: onAutoOrient bumps its nonce via
+  // the onAutoOrientArrange callback prop.
 
   return (
     <>
@@ -268,10 +263,11 @@ export function PreparePanelStack({
             if (updates.length > 0) {
               scene.updateModelTransforms(updates.map((u) => ({ id: u.id, transform: u.transform })));
               // Re-orienting changes each model's footprint, so previously
-              // spaced-out parts can now overlap. Re-pack them collision-free
-              // once the new transforms have committed (see the nonce effect).
+              // spaced-out parts can now overlap. Ask Home to re-pack them
+              // collision-free once the new transforms have committed (the
+              // arrange must run post-commit; Home owns that nonce + effect).
               if (updates.length > 1) {
-                setAutoOrientArrangeNonce((n) => n + 1);
+                onAutoOrientArrange();
               }
             }
           }}
