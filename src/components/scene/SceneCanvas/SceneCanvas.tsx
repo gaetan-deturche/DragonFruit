@@ -3204,7 +3204,7 @@ export function SceneCanvas({
   }, [arrangeArrayPreviewItems]);
 
   const hideFootprintOutlineForPreview = React.useMemo(() => {
-    if (mode !== 'prepare' || transformMode !== 'arrange') return false;
+    if (mode !== 'prepare' || (transformMode !== 'arrange' && transformMode !== 'transform')) return false;
 
     const hasArrangePreview = arrangeGhostPreviewGroups.length > 0 || arrangeSupportPreviewDeltas.length > 0;
     const hasDuplicatePreview = effectiveDuplicatePreviewTransforms.length > 0 || !!duplicateActivePreviewTransform;

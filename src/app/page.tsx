@@ -104,7 +104,7 @@ import {
   isBoundsOutsideVolume,
   shouldUsePreciseBoundsForTransform,
 } from '@/utils/modelBounds';
-import { computeProjectedFootprintHull, computeProjectedFootprintSize } from '@/utils/modelFootprint';
+import { computeProjectedFootprintHull } from '@/utils/modelFootprint';
 import { bytesToBase64, base64ToBytes } from '@/utils/base64';
 import { snapshotGeometryPositions, geometryFromSnapshot } from '@/utils/geometrySnapshot';
 import {
@@ -220,7 +220,8 @@ import { AutoSupportPanel, getAutoSupportBusy, subscribeAutoSupportBusy, autoSup
 import { useAutomationBridge } from '@/automation/useAutomationBridge';
 import { getModelMesh } from '@/supports/autoSupport/meshStore';
 import { setPlateBoundsXY } from '@/supports/plateBounds';
-import { orientModelsIndependently } from '@/features/orientation/autoOrient';
+import { orientModelsIndependently, type AutoOrientOptions, type ModelOrientationUpdate } from '@/features/orientation/autoOrient';
+import { resolveFootprintOverlaps, type FootprintRect } from '@/features/orientation/resolveFootprintOverlaps';
 import { StartupUpdateChecker } from '@/features/updater/StartupUpdateChecker';
 import { IslandOverlay } from '@/components/scene/IslandOverlay';
 import { useSupportInteractionManager } from '@/features/supports/useSupportInteractionManager';
@@ -6942,13 +6943,16 @@ export default function Home() {
     activeTab: scene.mode,
   });
 
-  // Bumped after an auto-orient moved >1 model — by BOTH the bridge autoOrient
-  // command (below) and the UI button (PreparePanelStack, via its
-  // onAutoOrientArrange prop) — so the collision-aware arrange runs once the
-  // oriented transforms have committed to scene state. This lives in Home (not
-  // PreparePanelStack) because that panel is invoked inline and must stay
-  // hook-free. See the consuming effect below (after handleAutoArrangeModels).
+  // Bumped only when auto-orient could NOT clear overlaps with a minimal nudge
+  // (plate too full) — falls back to a full collision-free arrange once the
+  // oriented transforms have committed. See handleAutoOrientModels.
   const [autoOrientArrangeNonce, setAutoOrientArrangeNonce] = React.useState(0);
+  // Latest auto-orient handler (defined after the arrange manager, which it
+  // needs); the bridge calls through this ref.
+  const autoOrientModelsRef = React.useRef<(
+    scope: 'selection' | 'all',
+    opts?: AutoOrientOptions,
+  ) => ModelOrientationUpdate[]>(() => []);
 
   // Automation bridge — lets the DragonFruit MCP server drive auto-support and
   // model placement for scripted testing (dev/automation builds only; no-op
@@ -6963,16 +6967,7 @@ export default function Home() {
     getUnsupportedIslandCount: () => islandsPoc.tableStats.allUnsupported,
     clearModels: async () => { await scene.deleteModels(scene.models.map((m) => m.id)); },
     autoOrient: (opts) => {
-      // Orient EACH model independently (never the whole set as one group).
-      const updates = orientModelsIndependently(scene.models, getModelMesh, transformMgr.liftDistance ?? 0, opts);
-      if (updates.length > 0) {
-        scene.updateModelTransforms(updates.map((u) => ({ id: u.id, transform: u.transform })));
-        // Re-orienting changes each footprint → parts can now overlap in XY.
-        // Trigger the collision-aware arrange once the transforms have committed.
-        if (updates.length > 1) {
-          setAutoOrientArrangeNonce((n) => n + 1);
-        }
-      }
+      const updates = autoOrientModelsRef.current('all', opts);
       return updates.map((u) => ({ id: u.id, ...u.result }));
     },
     loadModel: async (path) => {
@@ -7167,7 +7162,8 @@ export default function Home() {
   }, [displayActiveModelId, scene.activeModelId, transformMgr.transform]);
 
   const supportBoundsByModelId = React.useMemo(() => {
-    if (scene.mode !== 'prepare' || transformMgr.transformMode !== 'arrange') {
+    // Arrange lives in both the Arrange (duplicate) and Modify (auto-arrange) tabs.
+    if (scene.mode !== 'prepare' || (transformMgr.transformMode !== 'arrange' && transformMgr.transformMode !== 'transform')) {
       return EMPTY_SUPPORT_BOUNDS_BY_MODEL_ID;
     }
 
@@ -7382,19 +7378,35 @@ export default function Home() {
       model.geometry,
       effectiveTransform,
     );
-    const meshFootprint = computeProjectedFootprintSize(
+    // Real XY footprint from the projected hull (origin-relative). Its center is
+    // generally NOT the model position once the model is tilted (the rotated
+    // shape's extent is asymmetric around the pivot), so we keep the true bounds
+    // and report the offset — arrange must place `position = slotCenter - offset`
+    // or parts drift off their slot (off-center, overlapping, even off-plate).
+    const meshHull = computeProjectedFootprintHull(
       model.geometry,
       effectiveTransform.rotation,
       effectiveTransform.scale,
     );
 
-    const approxCenterX = (meshApproxBounds.min.x + meshApproxBounds.max.x) * 0.5;
-    const approxCenterY = (meshApproxBounds.min.y + meshApproxBounds.max.y) * 0.5;
-
-    let minX = approxCenterX - (meshFootprint.width * 0.5);
-    let maxX = approxCenterX + (meshFootprint.width * 0.5);
-    let minY = approxCenterY - (meshFootprint.depth * 0.5);
-    let maxY = approxCenterY + (meshFootprint.depth * 0.5);
+    let minX: number;
+    let maxX: number;
+    let minY: number;
+    let maxY: number;
+    if (meshHull.length > 0) {
+      minX = Infinity; maxX = -Infinity; minY = Infinity; maxY = -Infinity;
+      for (const p of meshHull) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      }
+      minX += effectiveTransform.position.x; maxX += effectiveTransform.position.x;
+      minY += effectiveTransform.position.y; maxY += effectiveTransform.position.y;
+    } else {
+      minX = meshApproxBounds.min.x; maxX = meshApproxBounds.max.x;
+      minY = meshApproxBounds.min.y; maxY = meshApproxBounds.max.y;
+    }
     let minZ = meshApproxBounds.min.z;
     let maxZ = meshApproxBounds.max.z;
 
@@ -7425,6 +7437,9 @@ export default function Home() {
       width: Math.max(2, maxX - minX),
       depth: Math.max(2, maxY - minY),
       height: Math.max(2, maxZ - minZ),
+      // Footprint center relative to the model position (see meshHull above).
+      offsetX: (minX + maxX) * 0.5 - effectiveTransform.position.x,
+      offsetY: (minY + maxY) * 0.5 - effectiveTransform.position.y,
     };
   }, [getArrangeTransform, supportBoundsByModelId]);
 
@@ -7613,9 +7628,92 @@ export default function Home() {
     handleFillPlateDuplicate,
   } = arrange;
 
-  // Auto-orient (bridge command OR UI button) re-packs the models collision-free
-  // once the oriented transforms have committed. A ref holds the latest arrange
-  // handler so this effect depends only on the nonce.
+  // Auto-orient (UI button + bridge). Orients EACH target model independently
+  // (the selection, or every visible model when nothing is selected), keeps its
+  // XY position, and drops it to the lift height. It must only ORIENT: rather
+  // than re-packing the whole plate, overlaps created by the new footprints are
+  // cleared by nudging only the just-oriented models the minimal distance
+  // (other models are fixed obstacles). Only if that fails (plate too full)
+  // does it fall back to a full collision-free arrange.
+  const handleAutoOrientModels = React.useCallback((
+    scope: 'selection' | 'all',
+    opts?: AutoOrientOptions,
+  ): ModelOrientationUpdate[] => {
+    const visible = scene.models.filter((m) => m.visible);
+    let targets = visible;
+    if (scope === 'selection') {
+      const ids = new Set(scene.selectedModelIds);
+      if (scene.activeModelId) ids.add(scene.activeModelId);
+      const selected = visible.filter((m) => ids.has(m.id));
+      if (selected.length > 0) targets = selected;
+    }
+
+    const updates = orientModelsIndependently(targets, getModelMesh, transformMgr.liftDistance ?? 0, opts);
+    if (updates.length === 0) return updates;
+
+    // XY footprints: oriented models at their NEW transform (movable), the
+    // others at their current one (fixed). Supports are invalidated by the
+    // rotation anyway, so mesh hulls are enough.
+    const updatedById = new Map(updates.map((u) => [u.id, u]));
+    const rects: FootprintRect[] = [];
+    for (const model of visible) {
+      const u = updatedById.get(model.id);
+      const t = u ? u.transform : getArrangeTransform(model);
+      const hull = computeProjectedFootprintHull(model.geometry, t.rotation, t.scale);
+      if (hull.length === 0) continue;
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const p of hull) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      }
+      rects.push({
+        id: model.id,
+        minX: minX + t.position.x, maxX: maxX + t.position.x,
+        minY: minY + t.position.y, maxY: maxY + t.position.y,
+        movable: Boolean(u),
+      });
+    }
+
+    const v = scene.view3dSettings;
+    const rawMinX = v.originMode === 'front_left' ? 0 : -v.widthMm * 0.5;
+    const rawMinY = v.originMode === 'front_left' ? 0 : -v.depthMm * 0.5;
+    const sm = v.safetyMarginMm;
+    const { shifts, resolved } = resolveFootprintOverlaps(rects, {
+      minX: rawMinX + Math.max(0, sm?.left ?? 0),
+      maxX: rawMinX + v.widthMm - Math.max(0, sm?.right ?? 0),
+      minY: rawMinY + Math.max(0, sm?.front ?? 0),
+      maxY: rawMinY + v.depthMm - Math.max(0, sm?.back ?? 0),
+    }, Math.max(3, arrangeSpacingMm)); // room for the supports added next
+    for (const u of updates) {
+      const s = shifts.get(u.id);
+      if (s) u.transform.position.set(u.transform.position.x + s.dx, u.transform.position.y + s.dy, u.transform.position.z);
+    }
+
+    scene.updateModelTransforms(updates.map((u) => ({ id: u.id, transform: u.transform })));
+    // The active model renders from transformMgr's live transform; sync it or
+    // the stale pre-orient pose shows (and gets written back on next commit).
+    const activeUpdate = scene.activeModelId ? updatedById.get(scene.activeModelId) : undefined;
+    if (activeUpdate && displayActiveModelId === scene.activeModelId) {
+      const { position, rotation, scale } = activeUpdate.transform;
+      transformMgr.transformHook.setPosition(position.x, position.y, position.z);
+      transformMgr.transformHook.setRotation(rotation.x, rotation.y, rotation.z);
+      transformMgr.transformHook.setScale(scale.x, scale.y, scale.z);
+    }
+    if (!resolved) {
+      console.warn('[autoOrient] overlaps remain after minimal nudge — falling back to full auto-arrange');
+      setAutoOrientArrangeNonce((n) => n + 1);
+    }
+    return updates;
+  }, [arrangeSpacingMm, displayActiveModelId, getArrangeTransform, scene, transformMgr]);
+  React.useEffect(() => {
+    autoOrientModelsRef.current = handleAutoOrientModels;
+  });
+
+  // Fallback full arrange after an auto-orient that couldn't clear overlaps
+  // (runs post-commit; a ref holds the latest arrange handler so the effect
+  // depends only on the nonce).
   const autoArrangeAllRef = React.useRef(handleAutoArrangeModels);
   React.useEffect(() => {
     autoArrangeAllRef.current = handleAutoArrangeModels;
@@ -9658,7 +9756,7 @@ export default function Home() {
               holePunch: holePunch,
               arrange: arrange,
               organicCut: organicCut,
-              onAutoOrientArrange: () => setAutoOrientArrangeNonce((n) => n + 1),
+              onAutoOrient: () => { handleAutoOrientModels('selection'); },
               outsidePlateModelIds: outsidePlateModelIds,
               handleModelSelection: handleModelSelection,
               handleModelRangeSelection: handleModelRangeSelection,

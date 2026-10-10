@@ -13,7 +13,9 @@ import {
 type SceneManager = ReturnType<typeof useSceneCollectionManager>;
 type TransformManager = ReturnType<typeof useTransformManager>;
 type SceneModel = SceneManager['models'][number];
-type ModelDimsMm = { width: number; depth: number; height: number };
+// offsetX/offsetY: footprint center minus model position. Non-zero for tilted
+// models (asymmetric extent around the pivot); placements must subtract it.
+type ModelDimsMm = { width: number; depth: number; height: number; offsetX?: number; offsetY?: number };
 type SupportAwareDimsFn = (model: SceneModel, rotationZOverride?: number, transformOverride?: SceneModel['transform']) => ModelDimsMm;
 type FootprintPolygonFn = (model: SceneModel, rotationZOverride?: number, transformOverride?: SceneModel['transform']) => THREE.Vector2[];
 
@@ -386,7 +388,7 @@ export function useArrangeManager({
         applyArrangeTransforms([{
           id: model.id,
           transform: {
-            position: new THREE.Vector3(centerX, centerY, t.position.z),
+            position: new THREE.Vector3(centerX - (dims.offsetX ?? 0), centerY - (dims.offsetY ?? 0), t.position.z),
             rotation: t.rotation.clone(),
             scale: t.scale.clone(),
           },
@@ -440,6 +442,8 @@ export function useArrangeManager({
         model: (typeof visibleModels)[number];
         width: number;
         depth: number;
+        offsetX: number;
+        offsetY: number;
         row: number;
         indexInRow: number;
         rotationZ: number;
@@ -449,6 +453,8 @@ export function useArrangeManager({
         model: (typeof visibleModels)[number];
         width: number;
         depth: number;
+        offsetX: number;
+        offsetY: number;
         rotationZ: number;
       };
 
@@ -465,7 +471,7 @@ export function useArrangeManager({
       ) => {
         const rows: Row[] = [];
         const spills: SpillEntry[] = [];
-        const placementSizeCache = new Map<string, { width: number; depth: number }>();
+        const placementSizeCache = new Map<string, { width: number; depth: number; offsetX?: number; offsetY?: number }>();
 
         let occupiedArea = 0;
         let totalDepthUsed = 0;
@@ -474,6 +480,8 @@ export function useArrangeManager({
           rotationZ: number;
           width: number;
           depth: number;
+          offsetX: number;
+          offsetY: number;
         };
 
         const normalizeToPi = (angle: number) => {
@@ -506,8 +514,10 @@ export function useArrangeManager({
           const currentCanonical = normalizeToPi(currentZ);
 
           if (!enableRotation) {
-            const dims = footprintAtAngle(current.model, currentCanonical);
-            return [{ rotationZ: currentZ, width: dims.width, depth: dims.depth }];
+            // Keep the model's exact current Z (not its canonical [0,π) twin)
+            // so the footprint offset matches the rotation actually applied.
+            const dims = footprintAtAngle(current.model, currentZ);
+            return [{ rotationZ: currentZ, width: dims.width, depth: dims.depth, offsetX: dims.offsetX ?? 0, offsetY: dims.offsetY ?? 0 }];
           }
 
           const candidateCanonicals: number[] = [currentCanonical];
@@ -529,10 +539,14 @@ export function useArrangeManager({
             if (seenFootprints.has(key)) continue;
             seenFootprints.add(key);
 
+            // rotationZ ≡ canonical (mod 2π), so the offset measured at the
+            // canonical angle is exactly the applied one.
             options.push({
               rotationZ: nearestEquivalentAngle(currentZ, canonical),
               width: dims.width,
               depth: dims.depth,
+              offsetX: dims.offsetX ?? 0,
+              offsetY: dims.offsetY ?? 0,
             });
           }
 
@@ -556,6 +570,8 @@ export function useArrangeManager({
               model: current.model,
               width: fallback.width,
               depth: fallback.depth,
+              offsetX: fallback.offsetX,
+              offsetY: fallback.offsetY,
               rotationZ: fallback.rotationZ,
             });
             continue;
@@ -613,6 +629,8 @@ export function useArrangeManager({
               model: current.model,
               width: fallback.width,
               depth: fallback.depth,
+              offsetX: fallback.offsetX,
+              offsetY: fallback.offsetY,
               rotationZ: fallback.rotationZ,
             });
             continue;
@@ -628,6 +646,8 @@ export function useArrangeManager({
               model: current.model,
               width: bestPlacement.option.width,
               depth: bestPlacement.option.depth,
+              offsetX: bestPlacement.option.offsetX,
+              offsetY: bestPlacement.option.offsetY,
               row: rows.length - 1,
               indexInRow: 0,
               rotationZ: bestPlacement.option.rotationZ,
@@ -643,6 +663,8 @@ export function useArrangeManager({
               model: current.model,
               width: bestPlacement.option.width,
               depth: bestPlacement.option.depth,
+              offsetX: bestPlacement.option.offsetX,
+              offsetY: bestPlacement.option.offsetY,
               row: bestPlacement.rowIndex,
               indexInRow: row.items.length,
               rotationZ: bestPlacement.option.rotationZ,
@@ -769,7 +791,13 @@ export function useArrangeManager({
 
       const packedWithPositions: Array<PackedEntry & { positionX: number; positionY: number }> = [];
       rows.forEach((row, rowIndex) => {
+        // Align each row inside the layout block per the anchor: centered rows
+        // for 'center' (a short last row used to hug the left edge, pulling the
+        // whole layout off-center), right-aligned for the right anchors.
+        const rowSlack = Math.max(0, totalWidth - row.widthUsed);
         let rowCursorX = startX;
+        if (arrangeAnchorMode === 'center') rowCursorX += rowSlack * 0.5;
+        else if (arrangeAnchorMode === 'front_right' || arrangeAnchorMode === 'back_right') rowCursorX += rowSlack;
         row.items.forEach((item) => {
           const centerX = rowCursorX + item.width * 0.5;
           packedWithPositions.push({
@@ -806,12 +834,14 @@ export function useArrangeManager({
 
       applyArrangeTransforms(
         [
-          ...packedWithPositions.map(({ model, rotationZ, positionX, positionY }) => {
+          // positionX/Y is the FOOTPRINT center; the model origin sits offset
+          // from it (tilted models), so subtract the offset.
+          ...packedWithPositions.map(({ model, rotationZ, positionX, positionY, offsetX, offsetY }) => {
             const t = modelTransformById.get(model.id) ?? model.transform;
             return {
               id: model.id,
               transform: {
-                position: new THREE.Vector3(positionX, positionY, t.position.z),
+                position: new THREE.Vector3(positionX - offsetX, positionY - offsetY, t.position.z),
                 rotation: new THREE.Euler(
                   t.rotation.x,
                   t.rotation.y,
@@ -822,12 +852,12 @@ export function useArrangeManager({
               },
             };
           }),
-          ...spillWithPositions.map(({ model, rotationZ, positionX, positionY }) => {
+          ...spillWithPositions.map(({ model, rotationZ, positionX, positionY, offsetX, offsetY }) => {
             const t = modelTransformById.get(model.id) ?? model.transform;
             return {
               id: model.id,
               transform: {
-                position: new THREE.Vector3(positionX, positionY, t.position.z),
+                position: new THREE.Vector3(positionX - offsetX, positionY - offsetY, t.position.z),
                 rotation: new THREE.Euler(
                   t.rotation.x,
                   t.rotation.y,
@@ -900,7 +930,7 @@ export function useArrangeManager({
         applyArrangeTransforms([{
           id: model.id,
           transform: {
-            position: new THREE.Vector3(centerX, centerY, t.position.z),
+            position: new THREE.Vector3(centerX - (dims.offsetX ?? 0), centerY - (dims.offsetY ?? 0), t.position.z),
             rotation: t.rotation.clone(),
             scale: t.scale.clone(),
           },
@@ -999,6 +1029,8 @@ export function useArrangeManager({
         width: projected.width,
         depth: projected.depth,
         height: scaledHeight,
+        offsetX: projected.offsetX ?? 0,
+        offsetY: projected.offsetY ?? 0,
       };
     });
 
@@ -1055,9 +1087,10 @@ export function useArrangeManager({
       return {
         id: model.id,
         transform: {
+          // Grid cell = footprint center; subtract the origin→footprint offset.
           position: new THREE.Vector3(
-            startX + (xIndex * stepX),
-            startY + (yIndex * stepY),
+            startX + (xIndex * stepX) - baseDims[index].offsetX,
+            startY + (yIndex * stepY) - baseDims[index].offsetY,
             baseZ + (zIndex * stepZ),
           ),
           rotation: t.rotation.clone(),
@@ -1135,7 +1168,7 @@ export function useArrangeManager({
         applyArrangeTransforms([{
           id: model.id,
           transform: {
-            position: new THREE.Vector3(centerX, centerY, t.position.z),
+            position: new THREE.Vector3(centerX - (dims.offsetX ?? 0), centerY - (dims.offsetY ?? 0), t.position.z),
             rotation: t.rotation.clone(),
             scale: t.scale.clone(),
           },
@@ -1189,7 +1222,8 @@ export function useArrangeManager({
   ]);
 
   React.useEffect(() => {
-    if (scene.mode !== 'prepare' || transformMgr.transformMode !== 'arrange' || arrangeLayoutMode !== 'array') {
+    // The ArrangePanel lives in the Modify (transform) tab.
+    if (scene.mode !== 'prepare' || transformMgr.transformMode !== 'transform' || arrangeLayoutMode !== 'array') {
       setArrangeArrayPreviewItems([]);
       return;
     }

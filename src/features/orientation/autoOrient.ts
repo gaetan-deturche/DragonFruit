@@ -82,7 +82,8 @@ export interface AutoOrientResult {
      *  suction-cup patch) at the chosen orientation. */
     contactAreaMm2: number;
     /** World Z of the lowest vertex once the rotation is applied at unit scale
-     *  with the model origin at Z=0. Drop a model to sit `lift` mm above the
+     *  with the model origin (= geometry bbox center, as rendered) at Z=0.
+     *  Drop a model to sit `lift` mm above the
      *  plate with:  position.z = lift - scale * restZOffsetMm. */
     restZOffsetMm: number;
     candidatesEvaluated: number;
@@ -271,15 +272,22 @@ export function computeAutoOrientation(
     }
 
     // Vertex-accurate lowest point along the chosen build direction, for drop-
-    // to-plate. World Z at unit scale = -(v · d), so the lowest vertex sits at
-    // -max_v(v · d). Full-resolution pass (not sub-sampled) for exact seating.
+    // to-plate. The rendered mesh is offset by -bboxCenter inside the model's
+    // transform group (StlMesh), so the model origin is the geometry's bbox
+    // CENTER, not the raw geometry origin: world Z at unit scale is
+    // -((v - c) · d), and the lowest vertex sits at -(max_v(v · d) - c · d).
+    // Ignoring c left models floating above (or sunk into) the plate by c · d
+    // whenever the STL's origin isn't at its center. Full-resolution pass.
+    if (!geom.boundingBox) geom.computeBoundingBox();
+    const c = geom.boundingBox!.getCenter(new THREE.Vector3());
+    const cDotD = c.x * bestD[0] + c.y * bestD[1] + c.z * bestD[2];
     let maxVdotD = -Infinity;
     for (let i = 0; i < pos.count; i++) {
         vA.fromBufferAttribute(pos, i);
         const vd = vA.x * bestD[0] + vA.y * bestD[1] + vA.z * bestD[2];
         if (vd > maxVdotD) maxVdotD = vd;
     }
-    const restZOffsetMm = Number.isFinite(maxVdotD) ? -maxVdotD : 0;
+    const restZOffsetMm = Number.isFinite(maxVdotD) ? -(maxVdotD - cDotD) : 0;
 
     // ── Rotation mapping local down-dir → world -Z (no twist) ──
     const dv = new THREE.Vector3(bestD[0], bestD[1], bestD[2]).normalize();

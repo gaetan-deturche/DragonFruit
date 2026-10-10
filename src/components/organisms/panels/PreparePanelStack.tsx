@@ -8,8 +8,6 @@ import { MeshSmoothingSettingsPanel } from '@/features/mesh-smoothing/MeshSmooth
 import { HollowingPanel } from '@/features/hollowing';
 import { HolePunchPanel } from '@/features/hole-punching/HolePunchPanel';
 import { OrganicCutPanel, type OrganicCutSession } from '@/features/organicCut';
-import { getModelMesh } from '@/supports/autoSupport/meshStore';
-import { orientModelsIndependently } from '@/features/orientation/autoOrient';
 import type { useSceneCollectionManager } from '@/features/scene/useSceneCollectionManager';
 import type { useTransformManager } from '@/features/transform/useTransformManager';
 import type { useHollowingManager } from '@/features/hollowing/useHollowingManager';
@@ -58,10 +56,10 @@ export type PreparePanelStackProps = {
   arrangeSpacingMm: number;
   setArrangeSpacingMm: (value: number) => void;
 
-  /** Called after a UI auto-orient moved >1 model, so Home can re-pack them
-   *  collision-free once the transforms have committed. Kept in Home (not here)
-   *  because this component must stay hook-free (invoked inline). */
-  onAutoOrientArrange: () => void;
+  /** Auto-orient the selection (or all models when nothing is selected). Lives
+   *  in Home — it needs hooks/state, and this component must stay hook-free
+   *  (invoked inline). */
+  onAutoOrient: () => void;
 };
 
 /** PREPARE-mode floating panel group: model manager, transform/smoothing/hollowing/arrange tools. */
@@ -101,7 +99,7 @@ export function PreparePanelStack({
   hasCavityGeometry,
   arrangeSpacingMm,
   setArrangeSpacingMm,
-  onAutoOrientArrange,
+  onAutoOrient,
 }: PreparePanelStackProps) {
   // Invoked inline by Home (not as <JSX/>) so FloatingPanelStack can flatten these keyed panels as direct children for its layout-profile positioning. 'use no memo' keeps React Compiler from injecting a useMemoCache hook (the conditional inline call must stay hook-free).
   'use no memo';
@@ -189,9 +187,56 @@ export function PreparePanelStack({
   // NOTE: this component is invoked inline by Home as a plain function (see the
   // 'use no memo' note above), so it MUST stay hook-free — any hook here runs in
   // Home's hook sequence and vanishes when Home stops calling it (mode switch),
-  // crashing with "Rendered fewer hooks than expected". The post-orient
-  // collision-arrange therefore lives in Home: onAutoOrient bumps its nonce via
-  // the onAutoOrientArrange callback prop.
+  // crashing with "Rendered fewer hooks than expected". Auto-orient therefore
+  // lives in Home (onAutoOrient prop).
+
+  // Auto-arrange block — shown in the Modify (transform) tab next to the other
+  // placement tools, rather than in its own tab.
+  const arrangePanel = (
+    <ArrangePanel
+      key="prepare-arrange-panel"
+      precisionMode={arrangePrecisionMode}
+      onPrecisionModeChange={setArrangePrecisionMode}
+      layoutMode={arrangeLayoutMode}
+      onLayoutModeChange={setArrangeLayoutMode}
+      spacingMm={arrangeSpacingMm}
+      onSpacingMmChange={setArrangeSpacingMm}
+      allowRotateOnZ={arrangeAllowRotateOnZ}
+      onAllowRotateOnZChange={setArrangeAllowRotateOnZ}
+      arrayCountX={arrangeArrayCountX}
+      arrayCountY={arrangeArrayCountY}
+      arrayCountZ={arrangeArrayCountZ}
+      onArrayCountXChange={setArrangeArrayCountX}
+      onArrayCountYChange={setArrangeArrayCountY}
+      onArrayCountZChange={setArrangeArrayCountZ}
+      arrayGapX={arrangeArrayGapX}
+      arrayGapY={arrangeArrayGapY}
+      arrayGapZ={arrangeArrayGapZ}
+      onArrayGapXChange={setArrangeArrayGapX}
+      onArrayGapYChange={setArrangeArrayGapY}
+      onArrayGapZChange={setArrangeArrayGapZ}
+      anchorMode={arrangeAnchorMode}
+      onAnchorModeChange={setArrangeAnchorMode}
+      onApplyAll={() => {
+        void (arrangeLayoutMode === 'array'
+          ? handleManualArrayArrangeModels('all')
+          : (arrangePrecisionMode === 'high_precision'
+            ? handleHighPrecisionArrangeModels('all')
+            : handleAutoArrangeModels('all')));
+      }}
+      onApplySelected={() => {
+        void (arrangeLayoutMode === 'array'
+          ? handleManualArrayArrangeModels('selected')
+          : (arrangePrecisionMode === 'high_precision'
+            ? handleHighPrecisionArrangeModels('selected')
+            : handleAutoArrangeModels('selected')));
+      }}
+      modelCount={scene.models.filter((m) => m.visible).length}
+      selectedModelCount={scene.models.filter((m) => m.visible && scene.selectedModelIds.includes(m.id)).length}
+      isApplying={isAutoArranging}
+      disableArrangeActions={isDuplicateSetupBlockingArrange}
+    />
+  );
 
   return (
     <>
@@ -255,22 +300,7 @@ export function PreparePanelStack({
           }}
           onResetRotation={transformMgr.transformHook.resetRotation}
           onRotationComplete={handleRotationComplete}
-          onAutoOrient={() => {
-            // Orient EACH model independently to its own optimum, then apply all
-            // transforms at once (updateModelTransforms handles history + support
-            // invalidation, with undo). Never rotate the whole set as one group.
-            const updates = orientModelsIndependently(scene.models, getModelMesh, transformMgr.liftDistance ?? 0);
-            if (updates.length > 0) {
-              scene.updateModelTransforms(updates.map((u) => ({ id: u.id, transform: u.transform })));
-              // Re-orienting changes each model's footprint, so previously
-              // spaced-out parts can now overlap. Ask Home to re-pack them
-              // collision-free once the new transforms have committed (the
-              // arrange must run post-commit; Home owns that nonce + effect).
-              if (updates.length > 1) {
-                onAutoOrientArrange();
-              }
-            }
-          }}
+          onAutoOrient={onAutoOrient}
           scale={transformMgr.transform.scale}
           onScaleChange={(x, y, z) => {
             const current = transformMgr.transform.scale;
@@ -309,6 +339,8 @@ export function PreparePanelStack({
           onTransformCommit={scheduleCommitPendingTransformHistory}
         />
       )}
+
+      {scene.models.length > 0 && transformMgr.transformMode === 'transform' && arrangePanel}
 
       {scene.geom && transformMgr.transformMode === 'smoothing' && (
         <MeshSmoothingSettingsPanel key="prepare-smoothing-settings" />
@@ -382,50 +414,6 @@ export function PreparePanelStack({
 
       {scene.models.length > 0 && transformMgr.transformMode === 'arrange' && (
         <>
-          <ArrangePanel
-            key="prepare-arrange-panel"
-            precisionMode={arrangePrecisionMode}
-            onPrecisionModeChange={setArrangePrecisionMode}
-            layoutMode={arrangeLayoutMode}
-            onLayoutModeChange={setArrangeLayoutMode}
-            spacingMm={arrangeSpacingMm}
-            onSpacingMmChange={setArrangeSpacingMm}
-            allowRotateOnZ={arrangeAllowRotateOnZ}
-            onAllowRotateOnZChange={setArrangeAllowRotateOnZ}
-            arrayCountX={arrangeArrayCountX}
-            arrayCountY={arrangeArrayCountY}
-            arrayCountZ={arrangeArrayCountZ}
-            onArrayCountXChange={setArrangeArrayCountX}
-            onArrayCountYChange={setArrangeArrayCountY}
-            onArrayCountZChange={setArrangeArrayCountZ}
-            arrayGapX={arrangeArrayGapX}
-            arrayGapY={arrangeArrayGapY}
-            arrayGapZ={arrangeArrayGapZ}
-            onArrayGapXChange={setArrangeArrayGapX}
-            onArrayGapYChange={setArrangeArrayGapY}
-            onArrayGapZChange={setArrangeArrayGapZ}
-            anchorMode={arrangeAnchorMode}
-            onAnchorModeChange={setArrangeAnchorMode}
-            onApplyAll={() => {
-              void (arrangeLayoutMode === 'array'
-                ? handleManualArrayArrangeModels('all')
-                : (arrangePrecisionMode === 'high_precision'
-                  ? handleHighPrecisionArrangeModels('all')
-                  : handleAutoArrangeModels('all')));
-            }}
-            onApplySelected={() => {
-              void (arrangeLayoutMode === 'array'
-                ? handleManualArrayArrangeModels('selected')
-                : (arrangePrecisionMode === 'high_precision'
-                  ? handleHighPrecisionArrangeModels('selected')
-                  : handleAutoArrangeModels('selected')));
-            }}
-            modelCount={scene.models.filter((m) => m.visible).length}
-            selectedModelCount={scene.models.filter((m) => m.visible && scene.selectedModelIds.includes(m.id)).length}
-            isApplying={isAutoArranging}
-            disableArrangeActions={isDuplicateSetupBlockingArrange}
-          />
-
           <DuplicatePanel
             key="prepare-duplicate-panel"
             activeModelName={scene.activeModel?.name ?? null}
