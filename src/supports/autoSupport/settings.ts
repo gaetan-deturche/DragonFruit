@@ -28,6 +28,15 @@ export interface AutoSupportSettings {
     verticalKnotSpacingMm: number;
     /** Max deviation for cone angle when searching for a clear attachment axis. */
     maxConeAngleDevDeg: number;
+    /** Also support mesh-minima islands the 0.05 mm slice scanner does not
+     *  confirm ("minimaOnly"). These are sub-resolution sculpt noise: they
+     *  merge into the surrounding surface within a layer, so supporting them
+     *  only scars fine detail. Off by default. */
+    supportUnconfirmedMinima: boolean;
+    /** Allow model-to-model Sticks/Twigs as a fallback when a trunk cannot reach
+     *  the plate. Their lower end lands ON the model (usually a visible
+     *  up-facing surface), so they are off by default. */
+    allowModelToModelSticks: boolean;
     debugClusterColorsEnabled: boolean;
     debugSkipAutoBracing: boolean;
 }
@@ -131,6 +140,8 @@ export function createDefaultAutoSupportSettings(): AutoSupportSettings {
         minHorizontalLeafAngleDeg: AUTO_SUPPORT_CONSTRAINTS.minHorizontalLeafAngleDeg.defaultValue,
         verticalKnotSpacingMm: AUTO_SUPPORT_CONSTRAINTS.verticalKnotSpacingMm.defaultValue,
         maxConeAngleDevDeg: AUTO_SUPPORT_CONSTRAINTS.maxConeAngleDevDeg.defaultValue,
+        supportUnconfirmedMinima: false,
+        allowModelToModelSticks: false,
         debugClusterColorsEnabled: false,
         debugSkipAutoBracing: false,
     };
@@ -159,6 +170,8 @@ export function normalizeAutoSupportSettings(input?: Partial<AutoSupportSettings
         minHorizontalLeafAngleDeg: clampNumeric(source.minHorizontalLeafAngleDeg, AUTO_SUPPORT_CONSTRAINTS.minHorizontalLeafAngleDeg),
         verticalKnotSpacingMm: clampNumeric(source.verticalKnotSpacingMm, AUTO_SUPPORT_CONSTRAINTS.verticalKnotSpacingMm),
         maxConeAngleDevDeg: clampNumeric(source.maxConeAngleDevDeg, AUTO_SUPPORT_CONSTRAINTS.maxConeAngleDevDeg),
+        supportUnconfirmedMinima: normalizeBoolean(source.supportUnconfirmedMinima, defaults.supportUnconfirmedMinima),
+        allowModelToModelSticks: normalizeBoolean(source.allowModelToModelSticks, defaults.allowModelToModelSticks),
         debugClusterColorsEnabled: normalizeBoolean(source.debugClusterColorsEnabled, defaults.debugClusterColorsEnabled),
         debugSkipAutoBracing: normalizeBoolean(source.debugSkipAutoBracing, defaults.debugSkipAutoBracing),
     };

@@ -21,6 +21,13 @@ import { runAutoBracing } from '../autoBracing/autoBrace';
 import { pushHistory } from '@/history/historyStore';
 import { getModelMesh } from './meshStore';
 import { generateOverhangCandidates, generateLowestPointCandidates } from './overhangSampling';
+import {
+    collidesWithOtherModels,
+    leafCapsules,
+    shaftEntityCapsules,
+    stickCapsules,
+    type SupportCapsule,
+} from './supportGeometry';
 
 const LOG_PREFIX = '[AutoSupport]';
 
@@ -71,86 +78,53 @@ function makeResult(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the real surface normal at a candidate's tip position by
- * raycasting against the model mesh — exactly the same way manual
- * placement obtains a surface normal from a click intersection.
+ * Resolve a support contact on a DOWN-facing surface at/above `tipPos`.
  *
- * Falls back to the candidate's existing tipNormal when the mesh is
- * unavailable or the raycast misses.
+ * Supports approach from below, so a valid contact is the first surface an
+ * upward ray meets, and that surface must face down (outward normal z < 0).
+ * {@link resolveSurfaceNormal} instead takes whichever surface is closest —
+ * often the up-facing TOP face of a thin feature — and the caller then forced
+ * the normal straight down, producing supports that climb THROUGH the model to
+ * land on a top (detail) face. Returns null when no down-facing surface lies
+ * within `maxDzMm` above the start, so the caller rejects instead of guessing.
  */
-function resolveSurfaceNormal(
-    tipPos: CandidatePoint['tipPos'],
+function resolveDownFacingContact(
+    tipPos: { x: number; y: number; z: number },
     mesh: THREE.Mesh | undefined,
-): { point: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } } {
-    if (!mesh) {
-        return { point: tipPos, normal: { x: 0, y: 0, z: -1 } };
-    }
-
+    startBelowMm = 0.6,
+    maxDzMm = 1.2,
+): { point: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } } | null {
+    if (!mesh) return null;
     const raycaster = new THREE.Raycaster();
+    const startZ = tipPos.z - startBelowMm;
+    raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, startZ), new THREE.Vector3(0, 0, 1));
+    const hit = raycaster.intersectObject(mesh, false)[0];
+    if (!hit) return null;
+    if (hit.point.z - startZ > startBelowMm + maxDzMm) return null;
+    // calculateSmoothedNormal returns the OUTWARD world normal. If the first
+    // surface met going up faces up, the ray started inside the solid: reject.
+    const n = calculateSmoothedNormal(hit);
+    if (n.z > -0.05) return null;
+    return { point: { x: hit.point.x, y: hit.point.y, z: hit.point.z }, normal: n };
+}
 
-    // Downward ray from just above the candidate — catches up-facing surfaces.
-    raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z + 2), new THREE.Vector3(0, 0, -1));
-    const hitsDown = raycaster.intersectObject(mesh, false);
+/** Capsules of a freshly built trunk (shaft from its root + contact cone). */
+function trunkCapsulesOf(build: {
+    trunk: { segments: Parameters<typeof shaftEntityCapsules>[0]; contactCone?: Parameters<typeof shaftEntityCapsules>[1] };
+    root?: { transform?: { pos?: { x: number; y: number; z: number } } };
+}): SupportCapsule[] {
+    return shaftEntityCapsules(build.trunk.segments, build.trunk.contactCone, build.root?.transform?.pos);
+}
 
-    // Upward ray from just below the candidate — catches down-facing surfaces.
-    // NOTE: use a fresh intersect call; do NOT reuse the raycaster state for the
-    // down ray afterwards (the previous implementation clobbered the down ray).
-    raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z - 2), new THREE.Vector3(0, 0, 1));
-    const hitsUp = raycaster.intersectObject(mesh, false);
-
-    const down = hitsDown[0];
-    const up = hitsUp[0];
-
-    // Pick whichever surface is actually closest to the candidate tip in Z
-    // (both rays are vertical, so |hit.z - tip.z| is the true surface distance).
-    let useUp: boolean;
-    if (down && up) {
-        useUp = Math.abs(up.point.z - tipPos.z) <= Math.abs(down.point.z - tipPos.z);
-    } else {
-        useUp = !down;
-    }
-
-    const hit = useUp ? up : down;
-    if (hit) {
-        const smoothed = calculateSmoothedNormal(hit);
-        // Down ray hits an up-facing surface → normal already points up/out.
-        // Up ray hits a down-facing surface → flip so the normal points down/out,
-        // toward the incoming support below.
-        const normal = useUp
-            ? { x: -smoothed.x, y: -smoothed.y, z: -smoothed.z }
-            : smoothed;
-        return {
-            point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
-            normal,
-        };
-    }
-
-    // Off-silhouette contact (e.g. an island contact snapped slightly outside
-    // the mesh): both vertical rays miss. Rather than float, shoot from the
-    // contact toward the mesh centre and snap onto the nearest surface so the
-    // support still attaches.
-    const box = new THREE.Box3().setFromObject(mesh);
-    const centre = box.getCenter(new THREE.Vector3());
-    const toCentre = new THREE.Vector3(centre.x - tipPos.x, centre.y - tipPos.y, centre.z - tipPos.z);
-    if (toCentre.lengthSq() > 1e-6) {
-        toCentre.normalize();
-        raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, tipPos.z), toCentre);
-        const hitsC = raycaster.intersectObject(mesh, false);
-        if (hitsC.length > 0) {
-            const hit = hitsC[0];
-            const smoothed = calculateSmoothedNormal(hit);
-            // Point the normal back toward the incoming support (opposite the
-            // ray direction we cast into the surface).
-            const dot = smoothed.x * toCentre.x + smoothed.y * toCentre.y + smoothed.z * toCentre.z;
-            const facing = dot > 0
-                ? { x: -smoothed.x, y: -smoothed.y, z: -smoothed.z }
-                : smoothed;
-            return { point: { x: hit.point.x, y: hit.point.y, z: hit.point.z }, normal: facing };
-        }
-    }
-
-    // Fallback: keep the existing normal.
-    return { point: tipPos, normal: { x: 0, y: 0, z: -1 } };
+/**
+ * Whether an island deserves its own support in the post-placement passes.
+ * Mirrors {@link generateCandidates}: unconfirmed mesh-minima (sub-resolution
+ * sculpt noise) and voxel islands below the minimum area are left alone —
+ * the fanning pass used to drop a leaf on every one of them.
+ */
+function isIslandWorthSupporting(island: DetectedIsland, settings: AutoSupportSettings): boolean {
+    if (island.source === 'minima' && island.class === 'minimaOnly') return settings.supportUnconfirmedMinima;
+    return (island.areaMm2 ?? 0) >= settings.minIslandAreaMm2;
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +356,7 @@ function findMergeHost(
  */
 function placeOneCandidate(
     candidate: CandidatePoint,
-    _settingsOverride: Partial<AutoSupportSettings> | undefined,
+    autoSettings: AutoSupportSettings,
     modelCtx?: ModelSizingContext,
     totalArea?: number,
 ): { kind: string; rejectedReason?: RejectReason; preset?: 'detail' | 'structure' | 'anchor'; entityId?: string; stickCount?: number; detail?: string } {
@@ -401,14 +375,18 @@ function placeOneCandidate(
         tipPos = candidate.tipPos;
         tipNormal = candidate.tipNormal;
     } else {
-        const resolved = resolveSurfaceNormal(candidate.tipPos, mesh);
+        // Island contacts are the lowest point of a region that faces down: the
+        // contact must be ON that down-facing surface. Never snap to a top face
+        // (that is what produced supports running through the model).
+        const resolved = resolveDownFacingContact(candidate.tipPos, mesh);
+        if (!resolved) {
+            const areaR = candidate.islandAreaMm2;
+            const presetR = areaR <= 0.15 ? 'detail' as const : areaR <= 0.50 ? 'structure' as const : 'anchor' as const;
+            return { kind: 'reject', rejectedReason: 'up_facing_contact', preset: presetR, detail: 'NO_DOWN_FACING_SURFACE' };
+        }
         tipPos = resolved.point;
         tipNormal = resolved.normal;
     }
-    // Supports approach from below, so the contact normal must point outward in
-    // the downward hemisphere. If it points upward (into the model — common for
-    // off-surface island contacts whose raycast snapped to the top face), fall
-    // back to straight-down so the trunk can attach.
     if (tipNormal.z > -0.05) {
         tipNormal = { x: 0, y: 0, z: -1 };
     }
@@ -416,6 +394,9 @@ function placeOneCandidate(
     // Determine preset band for analytics.
     const area = candidate.islandAreaMm2;
     const preset = area <= 0.15 ? 'detail' as const : area <= 0.50 ? 'structure' as const : 'anchor' as const;
+    const crossReject = {
+        kind: 'reject', rejectedReason: 'cross_model_collision' as RejectReason, preset, detail: 'CROSS_MODEL_COLLISION',
+    };
 
     // ── Gridless merge check ──────────────────────────────────────
     if (!supportSettings.grid?.enabled) {
@@ -505,6 +486,9 @@ function placeOneCandidate(
                         } else if (mesh && leafConeCollides(parentKnot.pos, leaf.contactCone, mesh)) {
                             console.log(LOG_PREFIX,
                                 `Leaf (merge) ${candidate.id}: triangle collision, trying branch...`);
+                        } else if (collidesWithOtherModels(leafCapsules(parentKnot.pos, leaf.contactCone), candidate.modelId)) {
+                            console.log(LOG_PREFIX,
+                                `Leaf (merge) ${candidate.id}: runs through another model, trying branch...`);
                         } else {
                             const cap = supportSettings.autoSupport?.maxAttachmentsPerTrunk ?? 12;
                             if (isTrunkAtAttachmentCapacity(host.trunkId, cap)) {
@@ -537,7 +521,9 @@ function placeOneCandidate(
                     const { branch, supportData: sd } = buildBranchData({
                         tipPos, tipNormal, modelId: candidate.modelId, parentKnot, mesh,
                     });
-                    const collides = sd.error || (mesh && branchCollidesWithSDF(branch, mesh));
+                    const collides = sd.error || (mesh && branchCollidesWithSDF(branch, mesh))
+                        || collidesWithOtherModels(
+                            shaftEntityCapsules(branch.segments, branch.contactCone, parentKnot.pos), candidate.modelId);
                     if (collides) {
                         console.log(LOG_PREFIX, `Branch (merge) ${candidate.id}: collision, falling back`);
                     } else {
@@ -580,7 +566,7 @@ function placeOneCandidate(
     if (trunkResult.error) {
         // Cavity fallback: if the trunk can't reach the build plate, try
         // bridging to a lower surface with a Stick (model-to-model).
-        if (trunkResult.error === 'COLLISION_WITH_MODEL' && mesh) {
+        if (trunkResult.error === 'COLLISION_WITH_MODEL' && mesh && autoSettings.allowModelToModelSticks) {
             // A model-to-model Stick/Twig is genuinely useful for a trapped
             // overhang (e.g. hair strands caged above shoulders), but it marks
             // BOTH surfaces it touches. When the vertical gap it bridges is tiny
@@ -592,7 +578,12 @@ function placeOneCandidate(
             const cavityResult = buildCavityStick(
                 tipPos, tipNormal, candidate.modelId, mesh, MIN_MODEL_TO_MODEL_Z_SPAN_MM,
             );
-            if (cavityResult) {
+            if (cavityResult && cavityResult.kind === 'stick' && collidesWithOtherModels(
+                stickCapsules(cavityResult.stick.segments, cavityResult.stick.contactConeA, cavityResult.stick.contactConeB),
+                candidate.modelId,
+            )) {
+                console.log(LOG_PREFIX, `Stick (cavity) ${candidate.id}: runs through another model, skipped`);
+            } else if (cavityResult) {
                 if (cavityResult.kind === 'stick') {
                     addStick(cavityResult.stick);
                     console.log(LOG_PREFIX,
@@ -610,7 +601,7 @@ function placeOneCandidate(
             const escape = buildEscapeTrunkData({
                 tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides, isPreview: false,
             });
-            if (!escape.error) {
+            if (!escape.error && !collidesWithOtherModels(trunkCapsulesOf(escape), candidate.modelId)) {
                 addRoot(escape.root);
                 addTrunk(escape.trunk);
                 console.log(LOG_PREFIX,
@@ -640,6 +631,7 @@ function placeOneCandidate(
 
     switch (decision.kind) {
         case 'place_trunk': {
+            if (collidesWithOtherModels(trunkCapsulesOf(decision.trunkBuild), candidate.modelId)) return crossReject;
             const trunkId = decision.trunkBuild.trunk.id;
             addRoot(decision.trunkBuild.root);
             addTrunk(decision.trunkBuild.trunk);
@@ -650,6 +642,10 @@ function placeOneCandidate(
         }
 
         case 'place_anchor':
+            if (collidesWithOtherModels(
+                shaftEntityCapsules(decision.anchor.segments, decision.anchor.contactCone, decision.anchor.joint?.pos),
+                candidate.modelId,
+            )) return crossReject;
             addAnchor(decision.anchor);
             console.log(LOG_PREFIX, `Anchor ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
             return { kind: 'anchor', preset };
@@ -661,6 +657,10 @@ function placeOneCandidate(
                     `Grid skip ${candidate.id}: host ${decision.hostTrunkId} at capacity (${cap})`);
                 return { kind: 'reject', rejectedReason: 'grid_reject_other', preset };
             }
+            if (collidesWithOtherModels(
+                shaftEntityCapsules(decision.branch.segments, decision.branch.contactCone, decision.knot.pos),
+                candidate.modelId,
+            )) return crossReject;
             addKnot(decision.knot);
             addBranch(decision.branch);
             console.log(LOG_PREFIX,
@@ -676,6 +676,9 @@ function placeOneCandidate(
                     `Grid skip ${candidate.id}: host ${decision.hostTrunkId} at capacity (${cap})`);
                 return { kind: 'reject', rejectedReason: 'grid_reject_other', preset };
             }
+            if (collidesWithOtherModels(leafCapsules(decision.knot.pos, decision.leaf.contactCone), candidate.modelId)) {
+                return crossReject;
+            }
             addKnot(decision.knot);
             addLeaf(decision.leaf);
             console.log(LOG_PREFIX,
@@ -685,6 +688,7 @@ function placeOneCandidate(
         }
 
         case 'replace_trunk':
+            if (collidesWithOtherModels(trunkCapsulesOf(decision.trunkBuild), candidate.modelId)) return crossReject;
             // The old trunk gets removed by the caller (or we accept overwrite).
             // For now: add the new trunk and root.  The old trunk's root is
             // implicitly replaced because we overwrite the grid node.
@@ -908,7 +912,7 @@ export function runAutoPlace(
             const ctx: ModelSizingContext | undefined = modelCtx
                 ? { ...modelCtx, candidatesBelowZ: belowCount.get(candidate.id) ?? candidates.length }
                 : undefined;
-            const result = placeOneCandidate(candidate, settingsOverride, ctx, candidate.islandAreaMm2);
+            const result = placeOneCandidate(candidate, autoSettings, ctx, candidate.islandAreaMm2);
             switch (result.kind) {
                 case 'trunk':   placedTrunks++; break;
                 case 'anchor':  placedAnchors++; break;
@@ -980,6 +984,9 @@ export function runAutoPlace(
 
     let coveredArea = 0;
     let totalArea = 0;
+    // Coverage is measured on the islands the generator intends to support;
+    // skipped sub-resolution noise would otherwise read as "uncovered".
+    islands = islands.filter((i) => isIslandWorthSupporting(i, autoSettings));
     for (const island of islands) {
         const area = island.areaMm2 ?? 0;
         totalArea += area;
@@ -1070,6 +1077,9 @@ export function runAutoPlace(
             trunkId: string; pos: { x: number; y: number; z: number }; diameter: number;
         }> = [];
         for (const [tid, trunk] of Object.entries(snap.trunks)) {
+            // Only this model's trunks: hosting a leaf on a NEIGHBOUR's trunk
+            // bridged models and ran supports straight through them.
+            if (trunk.modelId !== modelId) continue;
             for (const seg of trunk.segments) {
                 const start = seg.bottomJoint?.pos
                     ?? { x: 0, y: 0, z: 1.5 };
@@ -1106,6 +1116,7 @@ export function runAutoPlace(
 
         for (const island of islands) {
             if (supportedIds.has(island.id)) continue;
+            if (!isIslandWorthSupporting(island, autoSettings)) continue;
             const cx = island.contact.x;
             const cy = island.contact.y;
             const cz = island.contact.z;
@@ -1151,7 +1162,8 @@ export function runAutoPlace(
             }
 
             try {
-                const resolved = resolveSurfaceNormal({ x: cx, y: cy, z: cz }, leafMesh ?? undefined);
+                const resolved = resolveDownFacingContact({ x: cx, y: cy, z: cz }, leafMesh ?? undefined);
+                if (!resolved) continue;
                 const { leaf, supportData: sd } = buildLeafData({
                     tipPos: resolved.point,
                     surfaceNormal: resolved.normal,
@@ -1161,6 +1173,7 @@ export function runAutoPlace(
                     mesh: leafMesh ?? undefined,
                 });
                 if (sd.error) continue;
+                if (collidesWithOtherModels(leafCapsules(parentKnot.pos, leaf.contactCone), modelId)) continue;
                 const fanCap = autoSettings.maxAttachmentsPerTrunk;
                 if (isTrunkAtAttachmentCapacity(sp.trunkId, fanCap)) {
                     // Trunk full — skip this island for this pass.
@@ -1203,11 +1216,14 @@ export function runAutoPlace(
     // to place additional supports across the surface.
     const OVERHANG_AREA_THRESHOLD_MM2 = 1.5;
     const OVERHANG_GRID_SPACING_MM = 2.5;
+    /** A trunk only spreads extra contacts over the island it was placed for. */
+    const OVERHANG_HOST_MATCH_MM = 1.0;
 
     const islandById = new Map(islands.map(i => [i.id, i]));
     let overhangSupportsPlaced = 0;
 
     for (const [tid, trunk] of Object.entries(snapshot.trunks)) {
+        if (trunk.modelId !== modelId) continue;
         // Find which island this trunk was placed for by matching tip
         // proximity to island contact positions.
         const tip = trunk.contactCone?.pos;
@@ -1221,7 +1237,10 @@ export function runAutoPlace(
             const d2 = dx * dx + dy * dy + dz * dz;
             if (d2 < bestDist2) { bestDist2 = d2; bestIsland = island; }
         }
-        if (!bestIsland) continue;
+        // The nearest island must be the one this trunk actually holds — any
+        // trunk used to "adopt" the closest island however far, then fan a grid
+        // of branches over it.
+        if (!bestIsland || bestDist2 > OVERHANG_HOST_MATCH_MM * OVERHANG_HOST_MATCH_MM) continue;
 
         const area = bestIsland.areaMm2 ?? 0;
         const voxels = bestIsland.contactVoxels;
@@ -1268,7 +1287,10 @@ export function runAutoPlace(
                 // Place as a branch from the existing trunk.
                 try {
                     const overhangTip = { x: gx, y: gy, z: bestIsland.contact.z };
-                    const resolved = resolveSurfaceNormal(overhangTip, mesh);
+                    // The grid point sits at the island's base Z; on a sloped
+                    // underside the real surface can be a little higher.
+                    const resolved = resolveDownFacingContact(overhangTip, mesh, 0.6, 2.0);
+                    if (!resolved) continue;
                     const knotPos = trunk.segments[trunk.segments.length - 1]?.topJoint?.pos ?? tip;
                     const parentKnot = {
                         id: `auto-overhang-${bestIsland.id}-${r}-${c}`,
@@ -1284,7 +1306,10 @@ export function runAutoPlace(
                         parentKnot,
                         mesh: bm,
                     });
-                    if (!sd.error) {
+                    const blocked = sd.error
+                        || (bm && branchCollidesWithSDF(branch, bm))
+                        || collidesWithOtherModels(shaftEntityCapsules(branch.segments, branch.contactCone, knotPos), modelId);
+                    if (!blocked) {
                         const ohCap = autoSettings.maxAttachmentsPerTrunk;
                         if (isTrunkAtAttachmentCapacity(tid, ohCap)) {
                             continue;

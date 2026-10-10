@@ -187,3 +187,12 @@ test('candidateFromIsland maps all fields correctly', () => {
     assert.equal(candidate.modelId, '');
     assert.deepStrictEqual(candidate.tipNormal, { x: 0, y: 0, z: -1 });
 });
+
+test('generateCandidates skips unconfirmed mesh-minima unless enabled', () => {
+    const noise = makeIsland({ id: 'm1', source: 'minima', class: 'minimaOnly', areaMm2: undefined });
+    const real = makeIsland({ id: 'v1', source: 'voxel', class: 'voxelOnly', areaMm2: 0.2 });
+    const settings = createDefaultAutoSupportSettings();
+    assert.deepEqual(generateCandidates([noise, real], settings).map((c) => c.id), ['v1']);
+    const withMinima = { ...settings, supportUnconfirmedMinima: true };
+    assert.deepEqual(generateCandidates([noise, real], withMinima).map((c) => c.id).sort(), ['m1', 'v1']);
+});

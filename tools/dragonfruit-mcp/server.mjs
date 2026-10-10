@@ -142,7 +142,10 @@ wss.on('connection', (sock) => {
 });
 wss.on('error', (e) => log(`ws error: ${e.message}`));
 
-function call(cmd, args) {
+/** Commands that legitimately run for minutes on big plates (support generation, slicing). */
+const LONG_CALL_TIMEOUT_MS = Number(process.env.DF_MCP_LONG_TIMEOUT_MS || 15 * 60 * 1000);
+
+function call(cmd, args, timeoutMs = CALL_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
         if (!bridge || bridge.readyState !== bridge.OPEN) {
             return reject(new Error('DragonFruit is not connected. Open DragonFruit and check that Settings > AI Assistant is ON; the app reconnects automatically.'));
@@ -150,8 +153,8 @@ function call(cmd, args) {
         const id = nextId++;
         const timer = setTimeout(() => {
             pending.delete(id);
-            reject(new Error('Timed out waiting for DragonFruit.'));
-        }, CALL_TIMEOUT_MS);
+            reject(new Error(`Timed out waiting for DragonFruit (${cmd}, ${Math.round(timeoutMs / 1000)}s). It may still be running — check df_get_state.`));
+        }, timeoutMs);
         pending.set(id, {
             settle: (m) => {
                 clearTimeout(timer);
@@ -185,18 +188,41 @@ server.tool('df_generate_supports',
     {
         settings: z.record(z.any()).optional()
             .describe('Partial AutoSupportSettings overrides, e.g. { overhangSpacingMm: 3, overhangAngleThresholdDeg: 50 }'),
+        verbose: z.boolean().optional().describe('Return the full per-candidate debug lists (can exceed 100k chars on big models).'),
     },
-    async ({ settings }) => ok(await call('generateSupports', { settings })));
+    async ({ settings, verbose }) => ok(summarizeGenerate(await call('generateSupports', { settings }, LONG_CALL_TIMEOUT_MS), verbose)));
+
+/** Keep the analytics readable: full debug lists only on request. */
+function summarizeGenerate(res, verbose) {
+    if (verbose || !res?.analytics?.debug) return res;
+    const { rejects = [], uncovered = [] } = res.analytics.debug;
+    const errCounts = {};
+    for (const r of rejects) errCounts[r.err] = (errCounts[r.err] ?? 0) + 1;
+    const bigUncovered = [...uncovered].filter((u) => u.area >= 0.5).sort((a, b) => b.area - a.area);
+    return {
+        ...res,
+        analytics: {
+            ...res.analytics,
+            debug: {
+                rejectErrors: errCounts,
+                uncoveredCount: uncovered.length,
+                uncoveredZeroArea: uncovered.filter((u) => !u.area).length,
+                uncoveredTotalAreaMm2: Math.round(uncovered.reduce((s, u) => s + (u.area ?? 0), 0) * 10) / 10,
+                largestUncovered: bigUncovered.slice(0, 15),
+            },
+        },
+    };
+}
 
 server.tool('df_load_model',
     'Load a mesh (STL/OBJ/3MF) from an absolute file path onto the plate. Must be in Prepare mode.',
     { path: z.string().describe('Absolute path to the mesh file.') },
-    async ({ path: p }) => ok(await call('loadModel', { path: p })));
+    async ({ path: p }) => ok(await call('loadModel', { path: p }, LONG_CALL_TIMEOUT_MS)));
 
 server.tool('df_export',
-    'Export the current plate to a sliced file. Provide an absolute output path (extension decides the format, e.g. .pmx2).',
+    'Slice the visible models with the current Export-tab printer + material profile and write the sliced file (e.g. .pmx2) to an absolute path, without any dialog. Resolves once the file is written (can take minutes).',
     { path: z.string().optional().describe('Absolute output file path.') },
-    async ({ path: p }) => ok(await call('export', { path: p })));
+    async ({ path: p }) => ok(await call('export', { path: p }, LONG_CALL_TIMEOUT_MS)));
 
 // ── Model placement ─────────────────────────────────────────────────────────
 server.tool('df_get_transform', 'Get the active model transform: position (mm), rotation (degrees), scale.',
@@ -270,13 +296,25 @@ server.tool('df_screenshot', 'Capture the current 3D viewport (model + supports 
         return { content: [{ type: 'image', data: r.pngBase64, mimeType: 'image/png' }] };
     });
 
-server.tool('df_camera_view',
-    'Point the camera at a preset view of the plate, then fit the model. Use before df_screenshot to inspect placement from a known angle.',
-    { preset: z.enum(['top', 'bottom', 'front', 'back', 'left', 'right', 'iso']).describe('Camera view preset.') },
-    async ({ preset }) => ok(await call('setView', { preset })));
+const focusSchema = {
+    modelId: z.string().optional().describe('Frame only this model (id from df_list_models) instead of the whole plate.'),
+    center: z.object({ x: z.number(), y: z.number(), z: z.number() }).optional()
+        .describe('Frame a point in plate coordinates (mm), e.g. an island or support tip, for close inspection.'),
+    radiusMm: z.number().optional().describe('Half-size of the framed region in mm (with center, default 5; with modelId, overrides the model size).'),
+};
 
-server.tool('df_fit_view', 'Reframe the camera to fit the model in view (keeps the current angle).',
-    {}, async () => ok(await call('fitView')));
+server.tool('df_camera_view',
+    'Point the camera at a preset view and frame the whole plate — or, with modelId / center+radiusMm, zoom on one model or region. Use before df_screenshot.',
+    { preset: z.enum(['top', 'bottom', 'front', 'back', 'left', 'right', 'iso']).describe('Camera view preset.'), ...focusSchema },
+    async (args) => ok(await call('setView', args)));
+
+server.tool('df_fit_view', 'Reframe the camera (keeps the current angle) on the whole plate, or on one model / region with modelId or center+radiusMm.',
+    focusSchema, async (args) => ok(await call('fitView', args)));
+
+server.tool('df_audit_supports',
+    'Audit every support on the plate: counts per model of supports running through their own model, through ANOTHER model, touching an up-facing (top/detail) surface, or hanging off the trunk of another model. Returns totals, perModel and a list of offenders (with tip positions to frame with df_camera_view center).',
+    { maxOffenders: z.number().optional().describe('Max offenders listed (default 200).') },
+    async ({ maxOffenders }) => ok(await call('auditSupports', { maxOffenders }, LONG_CALL_TIMEOUT_MS)));
 
 // No top-level await: this file is bundled to CommonJS for the installer.
 server.connect(new StdioServerTransport()).then(

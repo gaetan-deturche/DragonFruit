@@ -55,6 +55,8 @@ export type RejectReason =
     | 'grid_reject_no_attachment'
     | 'grid_reject_other'
     | 'already_supported'
+    | 'cross_model_collision'
+    | 'up_facing_contact'
     | 'exception';
 
 /** Detailed analytics from an auto-place run. */

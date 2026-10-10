@@ -1114,6 +1114,22 @@ export default function Home() {
   const pendingPostSliceActionRef = React.useRef<'upload' | 'print' | null>(null);
   const pendingAutoStartPrintRef = React.useRef(false);
   const preSliceFileDestinationPathRef = React.useRef<string | null>(null);
+  // Pending slice-to-file request from the automation bridge (df_export): the
+  // destination is fixed up front, so the save dialog is skipped and the bridge
+  // is settled once the file is written (or the run ends without one).
+  const automationSliceRequestRef = React.useRef<{
+    path: string;
+    started: boolean;
+    resolve: (savedPath: string) => void;
+    reject: (error: Error) => void;
+  } | null>(null);
+  const settleAutomationSlice = React.useCallback((savedPath: string | null, error?: string) => {
+    const req = automationSliceRequestRef.current;
+    if (!req) return;
+    automationSliceRequestRef.current = null;
+    if (savedPath) req.resolve(savedPath);
+    else req.reject(new Error(error ?? 'Slice export failed.'));
+  }, []);
   const preSliceUploadSelectionRef = React.useRef<{ deviceId: string; materialId?: string } | null>(null);
   const preSliceTargetPickerResolverRef = React.useRef<((selection: { deviceId: string; materialId?: string } | null) => void) | null>(null);
   const preSlicePrintConfirmResolverRef = React.useRef<((confirmed: boolean) => void) | null>(null);
@@ -2364,8 +2380,9 @@ export default function Home() {
       return;
     }
 
-    // Dispatch slice intent action with the fresh artifact
-    const intent = sliceIntentRef.current;
+    // Dispatch slice intent action with the fresh artifact. An automation
+    // export always saves to its file, whatever intent the panel shows.
+    const intent = automationSliceRequestRef.current ? 'file' : sliceIntentRef.current;
     setCompletedSliceIntent(intent);
     setCompletedSaveDestinationPath(null);
     if (intent === 'upload' || intent === 'print') {
@@ -2389,6 +2406,7 @@ export default function Home() {
         && normalizePathForCompare(destinationPath) === normalizePathForCompare(nativePathForIntent)
       ) {
         setCompletedSaveDestinationPath(destinationPath);
+        settleAutomationSlice(destinationPath);
 
         // If intent is 'uvtools', show launching modal and fire UVTools
         if (intent === 'uvtools') {
@@ -2464,6 +2482,7 @@ export default function Home() {
           }
         }
 
+        settleAutomationSlice(savedPath, 'The sliced file could not be written.');
         if (savedPath) {
           setCompletedSaveDestinationPath(savedPath);
 
@@ -2487,7 +2506,21 @@ export default function Home() {
       };
       void saveAndNavigate(artifact);
     }
-  }, [scene]);
+  }, [scene, settleAutomationSlice]);
+
+  // A slice run that ends (busy → idle) without settling the automation request
+  // failed or was cancelled; give the post-slice file write a grace period first.
+  React.useEffect(() => {
+    if (isSlicingBusy) return;
+    const req = automationSliceRequestRef.current;
+    if (!req?.started) return;
+    const timer = window.setTimeout(() => {
+      if (automationSliceRequestRef.current === req) {
+        settleAutomationSlice(null, 'Slicing ended without writing the file (failed or cancelled — see the app log).');
+      }
+    }, 30000);
+    return () => window.clearTimeout(timer);
+  }, [isSlicingBusy, settleAutomationSlice]);
 
   const handleSlicingBenchmarkComplete = React.useCallback((benchmark: SliceExportResult['benchmark']) => {
     setPrintingSlicingBenchmark(benchmark);
@@ -3717,6 +3750,13 @@ export default function Home() {
 
     preSliceFileDestinationPathRef.current = null;
     preSliceUploadSelectionRef.current = null;
+
+    const automationRequest = automationSliceRequestRef.current;
+    if (automationRequest) {
+      automationRequest.started = true;
+      preSliceFileDestinationPathRef.current = automationRequest.path;
+      return true;
+    }
 
     if (intent === 'preview') {
       // Just slice — no preflight needed.
@@ -6999,6 +7039,34 @@ export default function Home() {
       const file = new File([], name, { lastModified: Date.now() });
       (file as File & { filePath?: string }).filePath = path;
       await handleDroppedPrepareFiles([file], { prearmedLoadingUi: true });
+    },
+    exportFile: async (path) => {
+      const outputPath = path?.trim();
+      if (!outputPath) throw new Error('df_export needs an absolute output path (e.g. C:\prints\plate.pmx2).');
+      if (automationSliceRequestRef.current) throw new Error('An export is already running.');
+      // The slicing panel only exists in the Export tab and registers its trigger
+      // on mount; drop any stale trigger from an earlier mount and wait for it.
+      if (scene.mode !== 'export') {
+        triggerSliceExportRef.current = null;
+        scene.setMode('export');
+      }
+      const waitStart = Date.now();
+      while (!triggerSliceExportRef.current) {
+        if (Date.now() - waitStart > 20000) throw new Error('The slicing panel did not open.');
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      return new Promise<string>((resolve, reject) => {
+        const req = { path: outputPath, started: false, resolve, reject };
+        automationSliceRequestRef.current = req;
+        triggerSliceExportRef.current?.();
+        // The panel bails out before starting (no printer/material profile, no
+        // visible model) without any callback — don't hang forever.
+        setTimeout(() => {
+          if (automationSliceRequestRef.current === req && !req.started) {
+            settleAutomationSlice(null, 'Slicing did not start: check the printer and material profiles and that a model is visible.');
+          }
+        }, 15000);
+      });
     },
     clearSupports: () => {
       const s = getSupportSnapshot();

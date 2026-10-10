@@ -5,6 +5,7 @@ import { getSettings } from '@/supports/Settings/state';
 import { getSnapshot } from '@/supports/state';
 import { runAutoPlace } from '@/supports/autoSupport';
 import type { AutoSupportSettings } from '@/supports/autoSupport/settings';
+import { auditSupports } from '@/supports/autoSupport/supportGeometry';
 import {
     getSavedAssistantSettings,
     setAssistantBridgeStatus,
@@ -111,10 +112,14 @@ type Command =
     | { id: number; cmd: 'elevate'; args: { mm: number } }
     | { id: number; cmd: 'resetTransform' }
     | { id: number; cmd: 'screenshot' }
-    | { id: number; cmd: 'setView'; args: { preset: 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso' } }
-    | { id: number; cmd: 'fitView' }
+    | { id: number; cmd: 'setView'; args: { preset: 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso' } & ViewFocus }
+    | { id: number; cmd: 'fitView'; args?: ViewFocus }
+    | { id: number; cmd: 'auditSupports'; args?: { maxOffenders?: number } }
     | { id: number; cmd: 'listModels' }
     | { id: number; cmd: 'getControlsState' };
+
+/** Optional camera focus: frame one model, or a point with a radius (mm), instead of the whole plate. */
+type ViewFocus = { modelId?: string; center?: { x: number; y: number; z: number }; radiusMm?: number };
 
 const DEFAULT_URL = 'ws://127.0.0.1:8791';
 const RECONNECT_MS = 2000;
@@ -358,15 +363,19 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
 
                 case 'setView': {
                     if (!window.__dfAutomation) throw new Error('scene camera not ready');
-                    window.__dfAutomation.setView(cmd.args.preset);
-                    return { view: cmd.args.preset };
+                    const { preset, ...focus } = cmd.args;
+                    window.__dfAutomation.setView(preset, focus);
+                    return { view: preset, ...focus };
                 }
 
                 case 'fitView': {
                     if (!window.__dfAutomation) throw new Error('scene camera not ready');
-                    window.__dfAutomation.fit();
+                    window.__dfAutomation.fit(cmd.args);
                     return { ok: true };
                 }
+
+                case 'auditSupports':
+                    return auditSupports(cmd.args?.maxOffenders ?? 200);
 
                 case 'getControlsState': {
                     if (!window.__dfAutomation?.getControlsState) throw new Error('scene camera not ready');

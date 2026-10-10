@@ -17,10 +17,13 @@ export function generateCandidates(
     // Note: grounded/plate-contact filtering is handled upstream by the
     // Islands panel's Plate toggle — filteredIslands already reflects it.
     const eligible = islands.filter(island => {
-        // Minima islands don't have area — they represent sharp geometric
-        // features that need support regardless of size.
+        // Mesh-minima islands the 0.05 mm slice scanner did not confirm are
+        // sub-resolution sculpt noise (a real downward point — e.g. a spike tip —
+        // shows up in the slice scan too, as an 'intersection'). Supporting them
+        // only scars fine detail, so they are skipped unless explicitly enabled.
         const isMinima = island.source === 'minima' && island.class === 'minimaOnly';
-        if (!isMinima) {
+        if (isMinima) return settings.supportUnconfirmedMinima;
+        {
             const area = island.areaMm2 ?? 0;
             if (area < settings.minIslandAreaMm2) return false;
         }
