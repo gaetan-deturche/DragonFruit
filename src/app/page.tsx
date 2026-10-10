@@ -6970,6 +6970,25 @@ export default function Home() {
       const updates = autoOrientModelsRef.current('all', opts);
       return updates.map((u) => ({ id: u.id, ...u.result }));
     },
+    arrange: async (opts) => {
+      if (opts?.mode === 'high_precision') await handleHighPrecisionArrangeModels('all');
+      else await handleAutoArrangeModels('all');
+      return { arranged: true };
+    },
+    listModels: () => {
+      const RAD2DEG = 180 / Math.PI;
+      return scene.models.filter((m) => m.visible).map((m) => {
+        const t = m.transform;
+        const dims = getModelSupportAwareDimensionsMm(m, undefined, t);
+        return {
+          id: m.id,
+          name: m.name,
+          position: { x: +t.position.x.toFixed(2), y: +t.position.y.toFixed(2), z: +t.position.z.toFixed(2) },
+          rotationDeg: { x: +(t.rotation.x * RAD2DEG).toFixed(1), y: +(t.rotation.y * RAD2DEG).toFixed(1), z: +(t.rotation.z * RAD2DEG).toFixed(1) },
+          footprint: { w: +dims.width.toFixed(2), d: +dims.depth.toFixed(2), offX: +(dims.offsetX ?? 0).toFixed(2), offY: +(dims.offsetY ?? 0).toFixed(2) },
+        };
+      });
+    },
     loadModel: async (path) => {
       const name = path.split(/[\\/]/).pop() || 'model.stl';
       const file = new File([], name, { lastModified: Date.now() });

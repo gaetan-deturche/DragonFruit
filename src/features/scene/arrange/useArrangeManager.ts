@@ -682,7 +682,21 @@ export function useArrangeManager({
         const deadSpace = Math.max(0, layoutArea - occupiedArea);
         const spillArea = spills.reduce((acc, item) => acc + (item.width * item.depth), 0);
         const spillPenalty = spills.length * 1_000_000 + spillArea * 100;
-        const aspectPenalty = Math.abs(totalWidth - totalDepth) * 0.05;
+
+        // Prefer a COMPACT, SQUARE-ish layout. `deadSpace` alone is minimised by a
+        // single-file column (n items stacked have zero gaps → deadSpace 0), which
+        // is why auto-arrange used to pile everything into one centred column. The
+        // bounding-box area is ~equal for a column and a grid of the same parts, so
+        // the discriminator is the ASPECT RATIO: penalise a long stripe/column
+        // (aspectRatio ≫ 1) strongly, scaled by the packed area, so a balanced grid
+        // of the same parts wins. deadSpace is kept (with a small weight) to still
+        // avoid ragged grids, and a mild bbox-area term breaks ties toward tighter
+        // packings. Spills still dominate so an infeasible grid never beats a valid
+        // column.
+        const longSide = Math.max(totalWidth, totalDepth);
+        const shortSide = Math.max(1, Math.min(totalWidth, totalDepth));
+        const aspectRatio = longSide / shortSide;
+        const aspectPenalty = (aspectRatio - 1) * occupiedArea * 0.6;
 
         return {
           rows,
@@ -690,7 +704,7 @@ export function useArrangeManager({
           rowDepths,
           totalWidth,
           totalDepth,
-          score: deadSpace + spillPenalty + aspectPenalty,
+          score: spillPenalty + aspectPenalty + deadSpace * 0.5 + layoutArea * 0.1,
           usedRotation: enableRotation,
         };
       };

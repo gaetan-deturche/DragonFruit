@@ -50,6 +50,10 @@ export interface AutomationBridgeHandlers {
     getUnsupportedIslandCount?: () => number;
     /** Compute + apply an optimized build orientation; returns the chosen result. */
     autoOrient?: (opts?: { overhangAngleDeg?: number; heightWeight?: number; candidateCount?: number }) => unknown;
+    /** Run the auto-arrange packer on all visible models (debug/testing). */
+    arrange?: (opts?: { mode?: 'standard' | 'high_precision' }) => Promise<unknown> | unknown;
+    /** List every model's id/name/position(mm)/rotation(deg)/footprint (debug/testing). */
+    listModels?: () => unknown;
     /** Remove all models from the scene (for scripted multi-model testing). */
     clearModels?: () => Promise<void>;
     /** Trigger a fresh island scan; resolves when done. */
@@ -73,6 +77,7 @@ type Command =
     | { id: number; cmd: 'getMode' }
     | { id: number; cmd: 'setMode'; args: { mode: string } }
     | { id: number; cmd: 'autoOrient'; args?: { overhangAngleDeg?: number; heightWeight?: number; candidateCount?: number } }
+    | { id: number; cmd: 'arrange'; args?: { mode?: 'standard' | 'high_precision' } }
     | { id: number; cmd: 'clearModels' }
     | { id: number; cmd: 'scanIslands' }
     | { id: number; cmd: 'clearSupports' }
@@ -89,6 +94,7 @@ type Command =
     | { id: number; cmd: 'screenshot' }
     | { id: number; cmd: 'setView'; args: { preset: 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso' } }
     | { id: number; cmd: 'fitView' }
+    | { id: number; cmd: 'listModels' }
     | { id: number; cmd: 'getControlsState' };
 
 const DEFAULT_URL = 'ws://127.0.0.1:8791';
@@ -163,6 +169,16 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                 case 'autoOrient': {
                     if (!h.autoOrient) throw new Error('autoOrient not wired');
                     return h.autoOrient(cmd.args);
+                }
+
+                case 'arrange': {
+                    if (!h.arrange) throw new Error('arrange not wired');
+                    return await h.arrange(cmd.args);
+                }
+
+                case 'listModels': {
+                    if (!h.listModels) throw new Error('listModels not wired');
+                    return h.listModels();
                 }
 
                 case 'clearModels': {
