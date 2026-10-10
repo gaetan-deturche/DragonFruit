@@ -7036,6 +7036,19 @@ export default function Home() {
     },
     loadModel: async (path) => {
       const name = path.split(/[\\/]/).pop() || 'model.stl';
+      if (name.toLowerCase().endsWith('.voxl')) {
+        // Scene files are parsed from their bytes in JS (unlike meshes, which are
+        // read natively from `filePath`), so an empty File fails the import — and
+        // its alert() freezes the webview, bridge included. Read the bytes first.
+        const bytes = await readPrintArtifactBytesFromPath(path);
+        const sceneBytes = new Uint8Array(bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength);
+        const sceneFile = new File([sceneBytes], name, { type: 'application/octet-stream' });
+        const restored = await importSceneFile(sceneFile, {
+          suppressRecentTracking: true, suppressPlacementPrompt: true, suppressRepair: true,
+        });
+        if (!restored) throw new Error(`Could not import scene ${path}`);
+        return;
+      }
       const file = new File([], name, { lastModified: Date.now() });
       (file as File & { filePath?: string }).filePath = path;
       await handleDroppedPrepareFiles([file], { prearmedLoadingUi: true });

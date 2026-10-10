@@ -97,16 +97,28 @@ function resolveDownFacingContact(
     if (!mesh) return null;
     const raycaster = new THREE.Raycaster();
     const startZ = tipPos.z - startBelowMm;
-    raycaster.set(new THREE.Vector3(tipPos.x, tipPos.y, startZ), new THREE.Vector3(0, 0, 1));
-    const hit = raycaster.intersectObject(mesh, false)[0];
-    if (!hit) return null;
-    if (hit.point.z - startZ > startBelowMm + maxDzMm) return null;
-    // calculateSmoothedNormal returns the OUTWARD world normal. If the first
-    // surface met going up faces up, the ray started inside the solid: reject.
-    const n = calculateSmoothedNormal(hit);
-    if (n.z > -0.05) return null;
-    return { point: { x: hit.point.x, y: hit.point.y, z: hit.point.z }, normal: n };
+    // Contacts often sit exactly on an edge or vertex (an island's lowest
+    // point), where a vertical ray can slip past the surface: retry with tiny
+    // XY offsets before giving up.
+    for (const [dx, dy] of CONTACT_RAY_OFFSETS_MM) {
+        raycaster.set(new THREE.Vector3(tipPos.x + dx, tipPos.y + dy, startZ), new THREE.Vector3(0, 0, 1));
+        const hit = raycaster.intersectObject(mesh, false)[0];
+        if (!hit) continue;
+        if (hit.point.z - startZ > startBelowMm + maxDzMm) continue;
+        // calculateSmoothedNormal returns the OUTWARD world normal. If the first
+        // surface met going up faces up, the ray started inside the solid.
+        const n = calculateSmoothedNormal(hit);
+        if (n.z > -0.05) continue;
+        return { point: { x: hit.point.x, y: hit.point.y, z: hit.point.z }, normal: n };
+    }
+    return null;
 }
+
+const CONTACT_RAY_OFFSETS_MM: ReadonlyArray<readonly [number, number]> = [
+    [0, 0],
+    [0.1, 0], [-0.1, 0], [0, 0.1], [0, -0.1],
+    [0.2, 0.2], [-0.2, 0.2], [0.2, -0.2], [-0.2, -0.2],
+];
 
 /** Capsules of a freshly built trunk (shaft from its root + contact cone). */
 function trunkCapsulesOf(build: {
@@ -133,6 +145,20 @@ function isIslandWorthSupporting(island: DetectedIsland, settings: AutoSupportSe
 
 /** Distance within which a candidate is considered already supported. */
 const ALREADY_SUPPORTED_RADIUS_MM = 3.0;
+
+/**
+ * Knot ids must be unique across the whole plate. They used to be derived from
+ * the island id alone ("auto-fan-v54-p0"), and island ids restart at v0/m0 for
+ * every model scan — so generating supports for a second model OVERWROTE the
+ * first model's knots, re-parenting its leaves onto the other model's trunks
+ * (100 mm leaves running across the plate).
+ */
+function uniqueKnotId(prefix: string): string {
+    return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** Candidates whose tips fall in the same cell of this size are the same contact. */
+const DUPLICATE_TIP_MM = 0.4;
 
 /**
  * Remove candidates whose tip position is already covered by an
@@ -371,7 +397,9 @@ function placeOneCandidate(
     // rejects as ANGLE_TOO_STEEP — so use the sampler values directly.
     let tipPos: { x: number; y: number; z: number };
     let tipNormal: { x: number; y: number; z: number };
-    if (candidate.source === 'overhang') {
+    // Overhang samples and lowest-point anchors are taken ON the mesh's
+    // down-facing surface already (anchors are the bottom vertices themselves).
+    if (candidate.source === 'overhang' || candidate.id.startsWith('lowest-')) {
         tipPos = candidate.tipPos;
         tipNormal = candidate.tipNormal;
     } else {
@@ -441,7 +469,7 @@ function placeOneCandidate(
                 if (seg?.diameter) knotDiameter = seg.diameter;
             }
             const parentKnot = {
-                id: `auto-merge-${candidate.id}`,
+                id: uniqueKnotId(`auto-merge-${candidate.id}`),
                 parentShaftId: bestKnotSegmentId || host.trunkId,
                 pos: knotPos,
                 diameter: knotDiameter + 0.1,
@@ -907,12 +935,26 @@ export function runAutoPlace(
     // the model) and let their contact cone penetrate. Sizing on own area lets a
     // trunk that genuinely hosts branches/leaves be re-sized later if needed.
 
+    // Tips placed during THIS run: filterAlreadySupported only sees supports that
+    // existed before it, so two near-identical candidates (e.g. the lowest-point
+    // anchors) could both become trunks on the very same spot.
+    const placedTipKeys = new Set<string>();
+    const tipKey = (p: { x: number; y: number; z: number }) =>
+        `${Math.round(p.x / DUPLICATE_TIP_MM)},${Math.round(p.y / DUPLICATE_TIP_MM)},${Math.round(p.z / DUPLICATE_TIP_MM)}`;
+    const countBefore = (): number => {
+        const s0 = getSnapshot();
+        return Object.keys(s0.trunks).length + Object.keys(s0.leaves).length + Object.keys(s0.branches).length + Object.keys(s0.anchors).length;
+    };
+
     for (const candidate of candidates) {
+        if (placedTipKeys.has(tipKey(candidate.tipPos))) continue;
         try {
+            const nBefore = countBefore();
             const ctx: ModelSizingContext | undefined = modelCtx
                 ? { ...modelCtx, candidatesBelowZ: belowCount.get(candidate.id) ?? candidates.length }
                 : undefined;
             const result = placeOneCandidate(candidate, autoSettings, ctx, candidate.islandAreaMm2);
+            if (countBefore() > nBefore) placedTipKeys.add(tipKey(candidate.tipPos));
             switch (result.kind) {
                 case 'trunk':   placedTrunks++; break;
                 case 'anchor':  placedAnchors++; break;
@@ -1145,7 +1187,7 @@ export function runAutoPlace(
             if (angleFromVertical > maxAngleRad) { skippedAngle++; continue; }
 
             const parentKnot = {
-                id: `auto-fan-${island.id}-p${pass}`,
+                id: uniqueKnotId(`auto-fan-${island.id}-p${pass}`),
                 parentShaftId: sp.trunkId,
                 pos: sp.pos,
                 diameter: sp.diameter + 0.1,
@@ -1293,7 +1335,7 @@ export function runAutoPlace(
                     if (!resolved) continue;
                     const knotPos = trunk.segments[trunk.segments.length - 1]?.topJoint?.pos ?? tip;
                     const parentKnot = {
-                        id: `auto-overhang-${bestIsland.id}-${r}-${c}`,
+                        id: uniqueKnotId(`auto-overhang-${bestIsland.id}-${r}-${c}`),
                         parentShaftId: tid,
                         pos: knotPos,
                         diameter: (trunk.segments[trunk.segments.length - 1]?.diameter ?? 1.0) + 0.1,

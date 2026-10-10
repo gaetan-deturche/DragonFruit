@@ -275,9 +275,33 @@ fn load_and_transform_mesh(
     matrix: [f32; 16],
     center: [f32; 3],
 ) -> Result<IndexedMesh, String> {
+    load_and_transform_mesh_with(file_path, matrix, center, false)
+}
+
+/// `center_from_file`: centre the file's vertices on THEIR OWN bounding-box
+/// centre instead of `center`. Needed when the in-memory geometry the caller
+/// measured `center` on is already centred (e.g. a model restored from a .voxl
+/// scene) while the mesh file on disk is not — otherwise every result is offset
+/// by the file's original bbox centre.
+fn load_and_transform_mesh_with(
+    file_path: &str,
+    matrix: [f32; 16],
+    center: [f32; 3],
+    center_from_file: bool,
+) -> Result<IndexedMesh, String> {
     let path = std::path::Path::new(file_path);
     let mut mesh = dragonfruit_mesh_repair::io::load_mesh_from_path(path)
         .map_err(|e| format!("Failed to load mesh from path {}: {:?}", file_path, e))?;
+    let center = if center_from_file {
+        let bbox = mesh.bbox();
+        [
+            (bbox.min.x + bbox.max.x) * 0.5,
+            (bbox.min.y + bbox.max.y) * 0.5,
+            (bbox.min.z + bbox.max.z) * 0.5,
+        ]
+    } else {
+        center
+    };
 
     // Transform vertices: p_world = matrix * (p_local - center)
     for pos in &mut mesh.positions {
@@ -610,11 +634,12 @@ pub async fn scan_islands_from_path(
     support_buffer_mm: f64,
     connectivity: u8,
     k: Option<usize>,
+    center_from_file: Option<bool>,
 ) -> Result<CombinedIslandScanResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // ── 1. Load and transform mesh ONCE ──────────────────────────────
         log::info!("[islands-combined] Loading mesh from {}", file_path);
-        let mesh = load_and_transform_mesh(&file_path, matrix, center)?;
+        let mesh = load_and_transform_mesh_with(&file_path, matrix, center, center_from_file.unwrap_or(false))?;
         let tri_count = mesh.triangle_count();
         let vert_count = mesh.vertex_count();
         log::info!(

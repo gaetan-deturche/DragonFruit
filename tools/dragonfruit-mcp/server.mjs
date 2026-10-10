@@ -178,7 +178,7 @@ server.tool('df_ping', 'Check the DragonFruit automation bridge is connected.',
     {}, async () => ok(await call('ping')));
 
 server.tool('df_scan_islands', 'Run a fresh island scan on the active model. Returns the new island count.',
-    {}, async () => ok(await call('scanIslands')));
+    {}, async () => ok(await call('scanIslands', undefined, LONG_CALL_TIMEOUT_MS)));
 
 server.tool('df_clear_supports', 'Remove all supports from the active model.',
     {}, async () => ok(await call('clearSupports')));

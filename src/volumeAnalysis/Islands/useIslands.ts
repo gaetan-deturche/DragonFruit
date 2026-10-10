@@ -195,19 +195,47 @@ export function useIslands({ geom, transform, layerHeightMm, supportTips, plateZ
         setScanProgress({ done: 0, total: 100 });
 
         console.log(`[Islands] Sideloading combined island scan from path: ${sourcePath}`);
-        const combined = await invoke<{ voxelIslands: any[]; minimaIslands: any[] }>(
-          'scan_islands_from_path',
-          {
-            filePath: sourcePath,
-            matrix: matrixElements,
-            center: centerCoords,
-            layerHeightMm,
-            pxMm,
-            supportBufferMm: supportBufMm,
-            connectivity,
-            k: minimaK,
-          },
-        );
+        // The Rust scan re-reads the mesh from `sourcePath` and recentres it with
+        // the IN-MEMORY geometry's centre. When those differ (a model restored
+        // from a .voxl scene keeps pre-centred geometry while the file on disk
+        // is not), every island lands far off the model. Each run is verified
+        // against the model's real world bounds; on a mismatch it is retried
+        // with the file's own bbox centre, and only then do we fall back to the
+        // (much heavier — it can exhaust webview memory on big meshes)
+        // client-side scan.
+        const worldBox = bb.clone().translate(center.clone().negate()).applyMatrix4(matrix).expandByScalar(1);
+        const runSideload = async (centerFromFile: boolean) => {
+          const result = await invoke<{ voxelIslands: any[]; minimaIslands: any[] }>(
+            'scan_islands_from_path',
+            {
+              filePath: sourcePath,
+              matrix: matrixElements,
+              center: centerCoords,
+              layerHeightMm,
+              pxMm,
+              supportBufferMm: supportBufMm,
+              connectivity,
+              k: minimaK,
+              centerFromFile,
+            },
+          );
+          const allContacts = [
+            ...result.voxelIslands.map((v) => v.contact),
+            ...result.minimaIslands.map((m) => m.position),
+          ];
+          const outside = allContacts.filter((c) => !worldBox.containsPoint(new THREE.Vector3(c.x, c.y, c.z))).length;
+          const ok = allContacts.length === 0 || outside <= allContacts.length * 0.05;
+          return { result, ok, outside, total: allContacts.length };
+        };
+        let attempt = await runSideload(false);
+        if (!attempt.ok) {
+          console.warn(`[Islands] Sideload islands off the model (${attempt.outside}/${attempt.total}); retrying centred on the source file's own bbox.`);
+          attempt = await runSideload(true);
+        }
+        if (!attempt.ok) {
+          throw new Error(`sideload islands outside the model bounds (${attempt.outside}/${attempt.total}) — source file frame mismatch`);
+        }
+        const combined = attempt.result;
 
         const voxelMapped: DetectedIsland[] = combined.voxelIslands
           .filter((v) => (v.areaMm2 ?? 0) >= minAreaMm2)

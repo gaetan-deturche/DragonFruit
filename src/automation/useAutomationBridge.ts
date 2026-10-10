@@ -3,9 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { DetectedIsland } from '@/volumeAnalysis/Islands/types';
 import { getSettings } from '@/supports/Settings/state';
 import { getSnapshot } from '@/supports/state';
-import { runAutoPlace } from '@/supports/autoSupport';
 import type { AutoSupportSettings } from '@/supports/autoSupport/settings';
-import { auditSupports } from '@/supports/autoSupport/supportGeometry';
 import {
     getSavedAssistantSettings,
     setAssistantBridgeStatus,
@@ -269,6 +267,10 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                     const islands = h.getIslands();
                     const base = getSettings().autoSupport;
                     const settings: AutoSupportSettings = { ...base, ...(cmd.args?.settings ?? {}) };
+                    // Dynamic import on every call: this socket effect is mounted once, so
+                    // a static import would pin the module version from app start and
+                    // hot-reloaded edits to the auto-support logic would never run.
+                    const { runAutoPlace } = await import('@/supports/autoSupport');
                     const result = runAutoPlace(islands, modelId, settings);
                     return {
                         placedTrunks: result.placedTrunks,
@@ -374,8 +376,10 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                     return { ok: true };
                 }
 
-                case 'auditSupports':
+                case 'auditSupports': {
+                    const { auditSupports } = await import('@/supports/autoSupport/supportGeometry');
                     return auditSupports(cmd.args?.maxOffenders ?? 200);
+                }
 
                 case 'getControlsState': {
                     if (!window.__dfAutomation?.getControlsState) throw new Error('scene camera not ready');

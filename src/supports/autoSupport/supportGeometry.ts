@@ -26,7 +26,7 @@ export interface SupportCapsule {
 }
 
 /** Cone length kept clear of the own model, measured back from the contact tip. */
-const OWN_CONE_TIP_ALLOWANCE_MM = 0.8;
+const OWN_CONE_TIP_ALLOWANCE_MM = 1.2;
 /** Shrinks shaft radii slightly so grazing contacts are not flagged as hits. */
 const RADIUS_TOLERANCE = 0.85;
 
@@ -36,11 +36,15 @@ function lerp(a: Vec3, b: Vec3, t: number): Vec3 {
     return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t };
 }
 
-/** Socket end of a contact cone (the end away from the model). */
+/**
+ * Socket end of a contact cone (the end away from the model). Despite the type's
+ * comment, `cone.normal` is the cone AXIS from the tip toward the socket — i.e.
+ * pointing OUT of the model (trunkBuilder: axis = socket − coneStart).
+ */
 export function coneSocket(cone: ContactCone): Vec3 {
     const n = cone.normal;
     const l = cone.profile?.lengthMm ?? 3;
-    return { x: cone.pos.x - n.x * l, y: cone.pos.y - n.y * l, z: cone.pos.z - n.z * l };
+    return { x: cone.pos.x + n.x * l, y: cone.pos.y + n.y * l, z: cone.pos.z + n.z * l };
 }
 
 function coneCapsule(cone: ContactCone, from?: Vec3): SupportCapsule {
@@ -70,7 +74,9 @@ export function shaftEntityCapsules(
     firstStart?: Vec3,
 ): SupportCapsule[] {
     const caps = segmentCapsules(segments, firstStart);
-    if (cone) caps.push(coneCapsule(cone));
+    // The shaft's top joint IS the cone socket: use it rather than re-deriving it.
+    const socket = [...segments].reverse().find((seg) => seg.topJoint)?.topJoint?.pos;
+    if (cone) caps.push(coneCapsule(cone, socket));
     return caps;
 }
 
@@ -100,6 +106,27 @@ function capsuleHitsMesh(c: SupportCapsule, mesh: THREE.Mesh, isOwnModel: boolea
     }
     if (len(sub(b, a)) < 1e-4) return false;
     return isShaftBlocked(a, b, Math.max(0.05, c.r), mesh);
+}
+
+/**
+ * Where a capsule first enters the mesh: binary search on the blocked prefix.
+ * Diagnostic only (audit), so a handful of extra SDF queries is fine.
+ */
+function firstHitAlong(c: SupportCapsule, mesh: THREE.Mesh, isOwnModel: boolean): { t: number; at: Vec3 } | null {
+    if (!capsuleHitsMesh(c, mesh, isOwnModel)) return null;
+    let lo = 0;
+    let hi = 1;
+    for (let i = 0; i < 12; i++) {
+        const mid = (lo + hi) / 2;
+        const prefix: SupportCapsule = { ...c, b: lerp(c.a, c.b, mid) };
+        if (capsuleHitsMesh(prefix, mesh, isOwnModel)) hi = mid; else lo = mid;
+    }
+    // For an own-model cone the tested capsule stops OWN_CONE_TIP_ALLOWANCE_MM
+    // short of its end, so the real entry point is that much further back.
+    const full = len(sub(c.b, c.a));
+    const entry = isOwnModel && c.part === 'cone' ? Math.max(0, full * hi - OWN_CONE_TIP_ALLOWANCE_MM) : full * hi;
+    const t = full > 0 ? entry / full : 0;
+    return { t, at: lerp(c.a, c.b, t) };
 }
 
 /** Ids of the models (other than `modelId`) that any of the capsules intersect. */
@@ -132,6 +159,10 @@ export interface SupportAuditOffender {
     /** Contact sits on an up-facing surface (the support reaches a top face from below). */
     tipOnUpFacing: boolean;
     tip?: Vec3;
+    /** First hit in another model: which model, capsule and where it enters. */
+    otherHit?: { modelId: string; capsule: number; of: number; part: SupportCapsule['part']; at: Vec3 };
+    /** First own-model hit: which capsule (index/part/length/radius) and where it enters. */
+    ownHit?: { capsule: number; of: number; part: SupportCapsule['part']; lengthMm: number; r: number; t: number; at: Vec3 };
 }
 
 export interface SupportAuditModelStats {
@@ -185,11 +216,29 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         stats.supports++;
         totals.supports++;
         const own = getModelMesh(modelId);
-        const throughOwnModel = own ? caps.some((c) => capsuleHitsMesh(c, own, true)) : false;
+        let ownHit: SupportAuditOffender['ownHit'];
+        if (own) {
+            for (let i = 0; i < caps.length && !ownHit; i++) {
+                const h = firstHitAlong(caps[i], own, true);
+                if (h) {
+                    const c = caps[i];
+                    ownHit = { capsule: i, of: caps.length, part: c.part, lengthMm: len(sub(c.b, c.a)), r: c.r, t: h.t, at: h.at };
+                }
+            }
+        }
+        const throughOwnModel = ownHit !== undefined;
         const throughOtherModels = otherModelsHit(caps, modelId);
-        // Contact normal points INTO the model; a support approaching an up-facing
-        // surface from below has its surface normal pointing up.
-        const tipOnUpFacing = tipCones.some((c) => (c.surfaceNormal ?? { x: -c.normal.x, y: -c.normal.y, z: -c.normal.z }).z > 0.2);
+        let otherHit: SupportAuditOffender['otherHit'];
+        if (throughOtherModels.length) {
+            const mesh = getModelMesh(throughOtherModels[0]);
+            for (let i = 0; mesh && i < caps.length && !otherHit; i++) {
+                const h = firstHitAlong(caps[i], mesh, false);
+                if (h) otherHit = { modelId: throughOtherModels[0], capsule: i, of: caps.length, part: caps[i].part, at: h.at };
+            }
+        }
+        // surfaceNormal is the outward surface normal at the contact; a support
+        // landing on an up-facing (top) surface has it pointing up.
+        const tipOnUpFacing = tipCones.some((c) => (c.surfaceNormal ?? c.normal).z > 0.2);
         const hostModel = hostShaftId ? shaftOwner.get(hostShaftId) : undefined;
         const crossHosted = hostModel !== undefined && hostModel !== modelId;
         if (throughOwnModel) { stats.throughOwnModel++; totals.throughOwnModel++; }
@@ -197,7 +246,7 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         if (tipOnUpFacing) { stats.tipsOnUpFacing++; totals.tipsOnUpFacing++; }
         if (crossHosted) { stats.crossModelHosted++; totals.crossModelHosted++; }
         if ((throughOwnModel || throughOtherModels.length || tipOnUpFacing || crossHosted) && offenders.length < maxOffenders) {
-            offenders.push({ kind, id, modelId, throughOwnModel, throughOtherModels, tipOnUpFacing, tip: tipCones[0]?.pos });
+            offenders.push({ kind, id, modelId, throughOwnModel, throughOtherModels, tipOnUpFacing, tip: tipCones[0]?.pos, ownHit, otherHit });
         }
     };
 
