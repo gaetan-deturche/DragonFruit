@@ -162,6 +162,8 @@ pub async fn check_updates(
 pub async fn perform_update(
     on_chunk: tauri::ipc::Channel<PerformUpdateProgress>,
 ) -> Result<String, String> {
+    info!("[updater] perform_update called");
+
     let update = {
         let mut cache = cached_update()
             .lock()
@@ -170,8 +172,11 @@ pub async fn perform_update(
     };
 
     let Some(update) = update else {
+        warn!("[updater] perform_update: no cached update (check_updates was not called or the cache was consumed)");
         return Err("No cached update. Call check_updates first.".into());
     };
+
+    info!("[updater] perform_update: starting download_and_install from {}", update.download_url);
 
     // Emit a Started progress event.
     let _ = on_chunk.send(PerformUpdateProgress {

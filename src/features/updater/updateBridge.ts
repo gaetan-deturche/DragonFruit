@@ -5,8 +5,9 @@
  * Browser-mode calls return null gracefully.
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -121,21 +122,47 @@ export async function fetchUpdateInfo(
 // Download + install (via Rust — uses cached Update)
 // ---------------------------------------------------------------------------
 
+/** Progress payload emitted by the Rust `perform_update` command. */
+type PerformUpdateProgress = {
+  downloadedBytes: number;
+  totalBytes: number | null;
+  phase: string;
+};
+
 /**
  * Download and install the previously cached update.
  * The Rust side handles signature verification, installer launch, and exit.
+ *
+ * `perform_update` REQUIRES an `on_chunk` Channel argument. Invoking it without
+ * one made Tauri fail to deserialize the command arguments BEFORE the command
+ * body ran — so no Rust log line was ever written and the UI only showed a
+ * generic "Download or install failed". This is why in-app auto-update never
+ * worked on any version. We pass the Channel (which also drives the progress
+ * bar, previously ignored) and log through the Tauri log plugin so the reason
+ * reaches dragonfruit.log (plain console.* is NOT forwarded to the Rust log —
+ * attachConsole only forwards Rust→webview, not the reverse).
  */
 export async function downloadAndInstall(
-  _onProgress?: (progress: DownloadProgress) => void,
+  onProgress?: (progress: DownloadProgress) => void,
 ): Promise<boolean> {
   try {
-    await invoke('perform_update');
+    const onChunk = new Channel<PerformUpdateProgress>();
+    onChunk.onmessage = (msg) => {
+      onProgress?.({
+        contentLength: msg.totalBytes ?? 0,
+        downloaded: msg.downloadedBytes,
+      });
+    };
+    void logInfo('[updater] perform_update: invoking (download + install)');
+    const result = await invoke<string>('perform_update', { onChunk });
+    void logInfo(`[updater] perform_update returned: ${result}`);
     await relaunch();
     return true;
   } catch (err) {
-    // Was swallowed silently, which is why "Update Failed" never said WHY.
-    // Surface the real reason (signature verify / download / NSIS install) —
-    // console.error is routed into the Rust log (dragonfruit.log).
+    // Surface the real reason (bad args / signature verify / download / NSIS
+    // install). Use the log plugin — console.error does NOT reach the Rust log.
+    const message = err instanceof Error ? err.message : String(err);
+    void logError(`[updater] perform_update/relaunch failed: ${message}`);
     console.error('[updater] perform_update/relaunch failed:', err);
     return false;
   }
