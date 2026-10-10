@@ -223,6 +223,16 @@ export class BucketedSlicer {
   }
 
   slice(z: number): THREE.Vector2[][] {
+    return buildLoops(this.sliceSegments(z));
+  }
+
+  /**
+   * Raw slice segments at Z (no loop stitching). Even-odd filling only needs
+   * the segments; stitching them into loops can fail on dense meshes, and the
+   * open chains it leaves get implicitly closed by the fill — flipping
+   * inside/outside over large areas.
+   */
+  sliceSegments(z: number): Array<[THREE.Vector2, THREE.Vector2]> {
     const bucketIdx = Math.floor((z - this.minZ) / this.bucketHeight);
     if (bucketIdx < 0 || bucketIdx >= this.buckets.length) return [];
 
@@ -260,12 +270,18 @@ export class BucketedSlicer {
       const e12 = intersectEdgeZ(v1x, v1y, v1z, v2x, v2y, v2z); if (e12) points.push(e12);
       const e20 = intersectEdgeZ(v2x, v2y, v2z, v0x, v0y, v0z); if (e20) points.push(e20);
 
+      // A vertex lying on the plane is reported by two edges: drop the duplicate.
+      if (points.length === 3) {
+        const same = (p: THREE.Vector3, q: THREE.Vector3) => Math.abs(p.x - q.x) < 1e-9 && Math.abs(p.y - q.y) < 1e-9;
+        if (same(points[0], points[1])) points.splice(1, 1);
+        else if (same(points[1], points[2]) || same(points[0], points[2])) points.splice(2, 1);
+      }
       if (points.length === 2) {
         const a = new THREE.Vector2(points[0].x, -points[0].y);
         const b = new THREE.Vector2(points[1].x, -points[1].y);
         segments.push([a, b]);
       }
     }
-    return buildLoops(segments);
+    return segments;
   }
 }

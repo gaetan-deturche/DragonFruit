@@ -182,10 +182,37 @@ struct Edge {
     slope: f64, // dx/dy
 }
 
-/// Rasterize polygon loops into a binary mask using edge-table scanline fill.
-/// Matches TS `rasterizeLoopsToExistingGridScanline` exactly.
+/// Rasterize polygon loops into a binary mask (even-odd across ALL loops).
 fn rasterize_loops(
     loops: &[Vec<Pt2>],
+    width: usize,
+    height: usize,
+    origin_x: f64,
+    origin_z: f64, // = -bbox.max_y
+    px_mm: f64,
+) -> Vec<u8> {
+    let mut segments: Vec<(Pt2, Pt2)> = Vec::new();
+    for loop_pts in loops {
+        let len = loop_pts.len();
+        if len < 3 {
+            continue;
+        }
+        for i in 0..len {
+            segments.push((loop_pts[i], loop_pts[(i + 1) % len]));
+        }
+    }
+    rasterize_segments(&segments, width, height, origin_x, origin_z, px_mm)
+}
+
+/// Even-odd edge-table scanline fill straight from the slice SEGMENTS.
+///
+/// Parity only needs every boundary crossing on a scanline, not ordered loops,
+/// so this skips loop stitching entirely. Stitching (hash-matching endpoints)
+/// fails now and then on dense meshes; the open chain it leaves was implicitly
+/// closed by the fill with a chord across the part, flipping inside/outside
+/// over large areas — phantom islands of hundreds of mm².
+fn rasterize_segments(
+    segments: &[(Pt2, Pt2)],
     width: usize,
     height: usize,
     origin_x: f64,
@@ -198,19 +225,15 @@ fn rasterize_loops(
     // (originXCenter is declared but NOT used in the coordinate mapping)
     let origin_y = origin_z + px_mm * 0.5;
 
-    for loop_pts in loops {
-        let len = loop_pts.len();
-        if len < 3 {
-            continue;
-        }
+    // ONE edge table for ALL loops of the layer, filled in a single even-odd
+    // pass. Filling each loop on its own and OR-ing them (as before) filled every
+    // hole: the inside of a hollow part or of an open box that closes at some
+    // height became "solid", appearing all at once with nothing below it — huge
+    // phantom islands floating in the air (e.g. 600-700 mm² inside a hull).
+    let mut edge_table: Vec<Vec<Edge>> = vec![Vec::new(); height];
 
-        // Build edge table
-        let mut edge_table: Vec<Vec<Edge>> = vec![Vec::new(); height];
-
-        for i in 0..len {
-            let p1 = loop_pts[i];
-            let p2 = loop_pts[(i + 1) % len];
-
+    for &(p1, p2) in segments {
+        {
             // TS: const x1 = (p1.x - originX) / px_mm;
             let x1 = (p1.0 - origin_x) / px_mm;
             let y1 = (p1.1 - origin_y) / px_mm;
@@ -242,7 +265,9 @@ fn rasterize_loops(
                 });
             }
         }
+    }
 
+    {
         // Scanline fill with active edge list
         let mut active_edges: Vec<Edge> = Vec::new();
 
@@ -379,10 +404,10 @@ pub fn rasterize_for_island_scan(
                 .iter()
                 .map(|&ti| &triangles[ti as usize])
                 .collect();
-            let loops = slice_to_loops_from_slice(&bucket_tris, z);
+            let segments = slice_segments_from_slice(&bucket_tris, z);
 
-            // Step 2: Rasterize loops using edge-table scanline fill
-            let dense = rasterize_loops(&loops, w, h, origin_x, origin_z, px_mm);
+            // Step 2: even-odd scanline fill straight from the segments
+            let dense = rasterize_segments(&segments, w, h, origin_x, origin_z, px_mm);
 
             rle_encode(&dense, grid_width, grid_height)
         })
@@ -400,7 +425,13 @@ pub fn rasterize_for_island_scan(
 
 /// Slice a pre-filtered set of triangles at Z height, building polygon loops.
 /// Same logic as `slice_to_loops` but takes a slice instead of iterating all triangles.
+#[allow(dead_code)]
 fn slice_to_loops_from_slice(triangles: &[&Triangle], z: f64) -> Vec<Vec<Pt2>> {
+    build_loops(&slice_segments_from_slice(triangles, z))
+}
+
+/// Raw slice segments (TS frame: x, -y) of the given triangles at Z.
+fn slice_segments_from_slice(triangles: &[&Triangle], z: f64) -> Vec<(Pt2, Pt2)> {
     let z_slice = z + 1e-5;
     let mut segments: Vec<(Pt2, Pt2)> = Vec::new();
 
@@ -431,6 +462,15 @@ fn slice_to_loops_from_slice(triangles: &[&Triangle], z: f64) -> Vec<Vec<Pt2>> {
             points.push(p);
         }
 
+        // A vertex lying on the plane is reported by both of its edges: drop the
+        // duplicate so the segment is not lost.
+        points.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9);
+        if points.len() == 3
+            && (points[0].0 - points[2].0).abs() < 1e-9
+            && (points[0].1 - points[2].1).abs() < 1e-9
+        {
+            points.pop();
+        }
         if points.len() == 2 {
             let a = (points[0].0, -points[0].1);
             let b = (points[1].0, -points[1].1);
@@ -438,7 +478,7 @@ fn slice_to_loops_from_slice(triangles: &[&Triangle], z: f64) -> Vec<Vec<Pt2>> {
         }
     }
 
-    build_loops(&segments)
+    segments
 }
 
 /// Helper to slice, rasterize, and RLE-encode a single layer.
@@ -451,9 +491,10 @@ pub fn rasterize_layer_for_island_scan(
     origin_z: f64,
     px_mm: f64,
 ) -> RleMask {
-    let loops = slice_to_loops(triangles, z);
-    let dense = rasterize_loops(
-        &loops,
+    let all: Vec<&Triangle> = triangles.iter().collect();
+    let segments = slice_segments_from_slice(&all, z);
+    let dense = rasterize_segments(
+        &segments,
         grid_width as usize,
         grid_height as usize,
         origin_x,
@@ -461,4 +502,46 @@ pub fn rasterize_layer_for_island_scan(
         px_mm,
     );
     rle_encode(&dense, grid_width, grid_height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Pt2> {
+        vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    }
+
+    #[test]
+    fn hole_between_two_loops_stays_empty() {
+        // 10 mm square with a 4 mm square hole, 1 mm pixels.
+        let loops = vec![square(0.0, 0.0, 10.0, 10.0), square(3.0, 3.0, 7.0, 7.0)];
+        let data = rasterize_loops(&loops, 10, 10, 0.0, -0.5, 1.0);
+        let at = |x: usize, y: usize| data[y * 10 + x];
+        assert_eq!(at(5, 5), 0, "hole centre must not be filled");
+        assert_eq!(at(1, 5), 1, "wall must be filled");
+        let filled: usize = data.iter().map(|&v| v as usize).sum();
+        assert_eq!(filled, 100 - 16);
+    }
+
+    #[test]
+    fn unordered_unstitched_segments_fill_like_loops() {
+        // Same square-with-hole, given as shuffled, reversed segments whose shared
+        // endpoints differ slightly in X (what defeats hash-based loop stitching).
+        let j = 1e-4;
+        let segments = vec![
+            ((7.0, 7.0), (3.0 + j, 7.0)),
+            ((0.0, 0.0), (10.0, 0.0)),
+            ((3.0, 3.0), (7.0 - j, 3.0)),
+            ((10.0 + j, 10.0), (0.0, 10.0)),
+            ((7.0, 3.0), (7.0, 7.0)),
+            ((10.0, 10.0), (10.0, 0.0)),
+            ((3.0, 7.0), (3.0, 3.0)),
+            ((0.0 - j, 0.0), (0.0, 10.0)),
+        ];
+        let data = rasterize_segments(&segments, 10, 10, 0.0, -0.5, 1.0);
+        let filled: usize = data.iter().map(|&v| v as usize).sum();
+        assert_eq!(data[5 * 10 + 5], 0);
+        assert_eq!(filled, 100 - 16);
+    }
 }

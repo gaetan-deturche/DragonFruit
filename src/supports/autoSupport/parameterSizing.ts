@@ -15,6 +15,14 @@ const PEEL_FORCE_N_PER_MM2 = 0.2;
 const MIN_SHAFT_DIAMETER_MM = 0.75;
 /** Maximum shaft diameter (mm). */
 const MAX_SHAFT_DIAMETER_MM = 2.5;
+/** Tensile strength of freshly printed (green, not post-cured) standard resin,
+ *  conservatively (N/mm² = MPa). Post-cured parts are 3-5× stronger. */
+const GREEN_RESIN_TENSILE_MPA = 10;
+/** Safety factor applied to the estimated load when sizing a shaft. */
+const SHAFT_SAFETY_FACTOR = 3;
+/** Typical resin layer height, used to estimate the per-layer peel area of an
+ *  inclined overhang (support settings do not carry the print layer height). */
+const LAYER_HEIGHT_FOR_SIZING_MM = 0.05;
 
 // ---------------------------------------------------------------------------
 // Override type
@@ -110,7 +118,19 @@ export function sizeParameters(
     const carriedWeightG = (modelWeightG * weightFraction) / Math.max(supportsBelow, 1);
 
     // Peel force from the supported area.
-    const effArea = Math.max(totalSupportedAreaMm2 ?? candidate.islandAreaMm2, 0.01);
+    let effArea = Math.max(totalSupportedAreaMm2 ?? candidate.islandAreaMm2, 0.01);
+    if (candidate.source === 'overhang') {
+        // An overhang sample stands for a whole spacing² cell of an INCLINED
+        // face, but the face is built a thin strip per layer, each strip fused to
+        // the one below: the area pulled off the FEP at any one layer is
+        // ~ cellWidth × layerHeight / tan(θ). Only near-flat ceilings approach
+        // the full cell (true islands keep their full area). Sizing every sample
+        // for the whole cell gave 1.7-2 mm trunks under every sloped wall.
+        const cellWidth = Math.sqrt(effArea);
+        const inclinationRad = (Math.max(candidate.overhangAngleDeg, 1) * Math.PI) / 180;
+        const stripArea = cellWidth * (LAYER_HEIGHT_FOR_SIZING_MM / Math.tan(inclinationRad));
+        effArea = Math.max(Math.min(effArea, stripArea), 0.01);
+    }
     const peelForceN = effArea * PEEL_FORCE_N_PER_MM2;
 
     // Total load.  Mesh minima are point contacts — 1.5× factor
@@ -118,10 +138,14 @@ export function sizeParameters(
     const rawLoadN = carriedWeightG * 0.0098 + peelForceN;
     const loadN = candidate.source === 'minima' ? rawLoadN * 1.5 : rawLoadN;
 
-    // Shaft diameter: scales with sqrt(load), floored at MIN.
-    const sizingMultiplier = clamp(Math.sqrt(loadN) * 1.2, 0.8, 2.0);
+    // Shaft diameter: the section that carries the load in tension with a
+    // safety margin — A = SF·F/σ  →  d = √(4·SF·F / (π·σ)). The previous
+    // empirical `√F × 1.2` (in shaftBase units) was ~2× the diameter physics
+    // asks for, so any candidate over ~16 mm² hit the 2 mm cap (overhang samples
+    // are 36 mm² cells → every one of them a 2 mm trunk). Floor and cap unchanged.
+    const requiredDiameterMm = Math.sqrt((4 * SHAFT_SAFETY_FACTOR * loadN) / (Math.PI * GREEN_RESIN_TENSILE_MPA));
     const shaftDiameterMm = round(
-        clamp(shaftBase * sizingMultiplier, MIN_SHAFT_DIAMETER_MM, MAX_SHAFT_DIAMETER_MM),
+        clamp(Math.max(shaftBase * 0.8, requiredDiameterMm), MIN_SHAFT_DIAMETER_MM, Math.min(MAX_SHAFT_DIAMETER_MM, shaftBase * 2.0)),
     3);
 
     // Tip contact: scaled by island area, but never thinner than 30%

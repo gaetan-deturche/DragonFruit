@@ -113,6 +113,11 @@ type Command =
     | { id: number; cmd: 'setView'; args: { preset: 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso' } & ViewFocus }
     | { id: number; cmd: 'fitView'; args?: ViewFocus }
     | { id: number; cmd: 'auditSupports'; args?: { maxOffenders?: number } }
+    | { id: number; cmd: 'getProfiles' }
+    | { id: number; cmd: 'selectPrinterProfile'; args: { id: string } }
+    | { id: number; cmd: 'selectMaterialProfile'; args: { id: string } }
+    | { id: number; cmd: 'duplicateMaterialProfile'; args?: { id?: string; name?: string } }
+    | { id: number; cmd: 'updateMaterialProfile'; args: { id?: string; base?: Record<string, unknown>; output?: Record<string, string | number | boolean>; antiAliasing?: Record<string, unknown> } }
     | { id: number; cmd: 'listModels' }
     | { id: number; cmd: 'getControlsState' };
 
@@ -262,6 +267,12 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                 }
 
                 case 'generateSupports': {
+                    // Generation is validated in the Support tab; make sure we are
+                    // there (and give React a beat to settle) before placing.
+                    if (h.getMode?.() !== 'support' && h.setMode) {
+                        h.setMode('support');
+                        await new Promise((r) => setTimeout(r, 400));
+                    }
                     const modelId = h.getActiveModelId();
                     if (!modelId) throw new Error('no active model');
                     const islands = h.getIslands();
@@ -374,6 +385,24 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                     if (!window.__dfAutomation) throw new Error('scene camera not ready');
                     window.__dfAutomation.fit(cmd.args);
                     return { ok: true };
+                }
+
+                case 'getProfiles':
+                    return (await import('@/automation/profileControl')).describeProfiles();
+
+                case 'selectPrinterProfile':
+                    return (await import('@/automation/profileControl')).selectPrinterProfile(cmd.args.id);
+
+                case 'selectMaterialProfile':
+                    return (await import('@/automation/profileControl')).selectMaterialProfile(cmd.args.id);
+
+                case 'duplicateMaterialProfile':
+                    return (await import('@/automation/profileControl')).duplicateMaterialProfile(cmd.args?.id, cmd.args?.name);
+
+                case 'updateMaterialProfile': {
+                    const { updateMaterialProfileSettings } = await import('@/automation/profileControl');
+                    const { id, ...patch } = cmd.args;
+                    return updateMaterialProfileSettings(id, patch as Parameters<typeof updateMaterialProfileSettings>[1]);
                 }
 
                 case 'auditSupports': {

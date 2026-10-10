@@ -145,20 +145,32 @@ export function rasterizeLoopsScanline(loops: Pt2[][], px_mm: number, paddingMm 
  * Rasterize loops into an existing grid reference (resizing not supported, assumes same grid).
  */
 export function rasterizeLoopsToExistingGridScanline(loops: Pt2[][], ref: Mask): Mask {
+    const segments: Array<[Pt2, Pt2]> = [];
+    for (const loop of loops) {
+        if (loop.length < 3) continue;
+        for (let i = 0; i < loop.length; i++) segments.push([loop[i], loop[(i + 1) % loop.length]]);
+    }
+    return rasterizeSegmentsToExistingGridScanline(segments, ref);
+}
+
+/**
+ * Even-odd scanline fill straight from slice SEGMENTS (no loop stitching), so a
+ * stitching failure cannot leave an open chain that the fill closes with a chord.
+ */
+export function rasterizeSegmentsToExistingGridScanline(segments: Array<[Pt2, Pt2]>, ref: Mask): Mask {
     const { width, height, originX, originZ, px_mm } = ref;
     const data = new Uint8Array(width * height);
     const originXCenter = originX + px_mm * 0.5;
     const originY = originZ + px_mm * 0.5;
 
-    for (const loop of loops) {
-        const len = loop.length;
-        if (len < 3) continue;
+    // ONE edge table for ALL loops, filled in a single even-odd pass. Filling each
+    // loop on its own and OR-ing them filled every hole: the inside of a hollow
+    // part, or of an open box that closes at some height, became "solid" all at
+    // once with nothing below it — huge phantom islands floating in the air.
+    const edgeTable: Array<Edge | null> = new Array(height).fill(null);
 
-        const edgeTable: Array<Edge | null> = new Array(height).fill(null);
-
-        for (let i = 0; i < len; i++) {
-            const p1 = loop[i];
-            const p2 = loop[(i + 1) % len];
+    for (const [p1, p2] of segments) {
+        {
 
             const x1 = (p1.x - originX) / px_mm;
             const y1 = (p1.y - originY) / px_mm;
@@ -180,7 +192,9 @@ export function rasterizeLoopsToExistingGridScanline(loops: Pt2[][], ref: Mask):
                 edgeTable[validStartRow] = edge;
             }
         }
+    }
 
+    {
         let activeEdgeList: Edge | null = null;
 
         for (let y = 0; y < height; y++) {

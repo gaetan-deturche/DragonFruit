@@ -173,10 +173,58 @@ export interface SupportAuditModelStats {
     crossModelHosted: number;
 }
 
+export interface TrunkStats {
+    count: number;
+    /** Shaft diameter (mm) → number of trunks. */
+    diameterHistogram: Record<string, number>;
+    /** Free length from plate to contact (mm): p50 / p90 / max. */
+    lengthMm: { p50: number; p90: number; max: number };
+    /** Length / diameter: p50 / p90 / max (slenderness — high = whippy). */
+    slenderness: { p50: number; p90: number; max: number };
+    tipContactMm: { min: number; max: number };
+    /** Braces (cross-ties between shafts) belonging to this model. */
+    braces: number;
+}
+
 export interface SupportAuditResult {
     totals: SupportAuditModelStats;
     perModel: Record<string, SupportAuditModelStats>;
+    trunks: Record<string, TrunkStats>;
     offenders: SupportAuditOffender[];
+}
+
+function pct(sorted: number[], q: number): number {
+    if (!sorted.length) return 0;
+    return Math.round(sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1)))] * 100) / 100;
+}
+
+function trunkStats(): Record<string, TrunkStats> {
+    const snap = getSnapshot();
+    const by: Record<string, { d: number[]; l: number[]; tip: number[] }> = {};
+    for (const t of Object.values(snap.trunks)) {
+        const e = (by[t.modelId] ??= { d: [], l: [], tip: [] });
+        const d = t.segments[0]?.diameter ?? 1;
+        const tipZ = t.contactCone?.pos.z ?? Math.max(...t.segments.map((s) => s.topJoint?.pos.z ?? 0));
+        e.d.push(d);
+        e.l.push(tipZ);
+        if (t.contactCone) e.tip.push(t.contactCone.profile?.contactDiameterMm ?? 0.4);
+    }
+    const out: Record<string, TrunkStats> = {};
+    for (const [id, e] of Object.entries(by)) {
+        const hist: Record<string, number> = {};
+        for (const d of e.d) { const k = (Math.round(d * 10) / 10).toFixed(1); hist[k] = (hist[k] ?? 0) + 1; }
+        const l = [...e.l].sort((a, b) => a - b);
+        const sl = e.l.map((len, i) => len / Math.max(e.d[i], 0.1)).sort((a, b) => a - b);
+        out[id] = {
+            count: e.d.length,
+            diameterHistogram: hist,
+            lengthMm: { p50: pct(l, 0.5), p90: pct(l, 0.9), max: pct(l, 1) },
+            slenderness: { p50: pct(sl, 0.5), p90: pct(sl, 0.9), max: pct(sl, 1) },
+            tipContactMm: { min: Math.min(...e.tip), max: Math.max(...e.tip) },
+            braces: Object.values(snap.braces ?? {}).filter((b) => b.modelId === id).length,
+        };
+    }
+    return out;
 }
 
 function emptyStats(): SupportAuditModelStats {
@@ -270,5 +318,5 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         visit('stick', s.id, s.modelId, stickCapsules(s.segments, s.contactConeA, s.contactConeB), [s.contactConeA, s.contactConeB]);
     }
 
-    return { totals, perModel, offenders };
+    return { totals, perModel, trunks: trunkStats(), offenders };
 }

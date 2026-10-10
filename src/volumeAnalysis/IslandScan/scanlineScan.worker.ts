@@ -1,7 +1,7 @@
 /* eslint-disable no-restricted-globals */
 import { type ScanLayerResult, type GridRef, VOXEL_OFFSET_X, VOXEL_OFFSET_Y, VOXEL_OFFSET_Z } from './ScanOrchestrator';
 import { type RleMask, rleEncode } from './rle';
-import { rasterizeLoopsScanline as rasterizeLoopsToMask, rasterizeLoopsToExistingGridScanline as rasterizeLoopsToExistingGrid } from './scanline';
+import { rasterizeLoopsScanline as rasterizeLoopsToMask, rasterizeSegmentsToExistingGridScanline } from './scanline';
 import { type Connectivity, type RasterScanOptions, type Mask } from './types';
 import { scanLayer } from './island';
 import { BucketedSlicer } from '@/components/analysis/Slice2D';
@@ -60,8 +60,13 @@ self.onmessage = (e: MessageEvent<InitMessage | StartMessage | LayerMessage>) =>
         const zTop = msg.z;
         const zBot = msg.z - msg.layerHeightMm;
 
-        const loopsNow2 = slicer.slice(zTop);
-        const loopsPrev2 = slicer.slice(zBot);
+        // Raw segments: even-odd fill straight from them (no loop stitching).
+        const toPt = ([a, b]: [{ x: number; y: number }, { x: number; y: number }]): [{ x: number; y: number }, { x: number; y: number }] =>
+            [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+        const segmentsNow = slicer.sliceSegments(zTop).map(toPt);
+        const segmentsPrev = slicer.sliceSegments(zBot).map(toPt);
+        const loopsNow2 = msg.gridRef ? [] : slicer.slice(zTop);
+        const loopsPrev2: typeof loopsNow2 = [];
 
         const t1 = performance.now();
 
@@ -71,17 +76,17 @@ self.onmessage = (e: MessageEvent<InitMessage | StartMessage | LayerMessage>) =>
 
         let currentMask: Mask;
         if (msg.gridRef) {
-            currentMask = rasterizeLoopsToExistingGrid(loopsNow, toMaskFromGridRef(msg.gridRef));
+            currentMask = rasterizeSegmentsToExistingGridScanline(segmentsNow, toMaskFromGridRef(msg.gridRef));
         } else {
             currentMask = rasterizeLoopsToMask(loopsNow, msg.opts.px_mm, 0);
         }
 
         // Ensure prevMask matches currentMask dimensions
         let prevMask: Mask | null = null;
-        if (loopsPrev) {
+        if (segmentsPrev.length > 0 || loopsPrev) {
             // Create a mask with same dimensions as currentMask
             const pm = { ...currentMask, data: new Uint8Array(currentMask.width * currentMask.height) };
-            prevMask = rasterizeLoopsToExistingGrid(loopsPrev, pm);
+            prevMask = rasterizeSegmentsToExistingGridScanline(segmentsPrev, pm);
         }
 
         const t2 = performance.now();

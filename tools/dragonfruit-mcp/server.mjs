@@ -311,6 +311,32 @@ server.tool('df_camera_view',
 server.tool('df_fit_view', 'Reframe the camera (keeps the current angle) on the whole plate, or on one model / region with modelId or center+radiusMm.',
     focusSchema, async (args) => ok(await call('fitView', args)));
 
+// ── Print profile (what df_export slices with) ──────────────────────────────
+server.tool('df_get_profiles',
+    'List printer and material profiles and show the active material in full: generic fields (exposure, layer height, lift…), anti-aliasing, and the output-format settings that actually reach the sliced file (e.g. Anycubic .pmx2: normalExposureSec, waitTimeBeforeCureSec, bottomExposureSec, transitionLayerCount…), each with its schema (min/max) and whether it is still at its default.',
+    {}, async () => ok(await call('getProfiles')));
+
+server.tool('df_select_printer_profile', 'Make a printer profile (id from df_get_profiles) the active one.',
+    { id: z.string() }, async ({ id }) => ok(await call('selectPrinterProfile', { id })));
+
+server.tool('df_select_material_profile', 'Make a material profile (id from df_get_profiles) the active one for slicing.',
+    { id: z.string() }, async ({ id }) => ok(await call('selectMaterialProfile', { id })));
+
+server.tool('df_duplicate_material',
+    'Copy a material profile (default: the active one) into an editable custom profile and make it active. Official profiles are read-only, so duplicate before editing.',
+    { id: z.string().optional(), name: z.string().optional().describe('Name of the copy.') },
+    async ({ id, name }) => ok(await call('duplicateMaterialProfile', { id, name })));
+
+server.tool('df_update_material',
+    'Edit a custom material profile (default: the active one). base = generic fields {name, layerHeightMm, normalExposureSec, bottomExposureSec, bottomLayerCount, liftDistanceMm, liftSpeedMmMin, retractSpeedMmMin, minimumAaAlphaPercent}; output = output-format settings by key as listed by df_get_profiles (these override base for formats like .pmx2); antiAliasing = {mode: "Off"|"Blur"|"3DAA", level: "4x", blurBrushRadiusPx, ...}. Returns the updated profile.',
+    {
+        id: z.string().optional(),
+        base: z.record(z.any()).optional(),
+        output: z.record(z.union([z.number(), z.string(), z.boolean()])).optional(),
+        antiAliasing: z.record(z.any()).optional(),
+    },
+    async (args) => ok(await call('updateMaterialProfile', args)));
+
 server.tool('df_audit_supports',
     'Audit every support on the plate: counts per model of supports running through their own model, through ANOTHER model, touching an up-facing (top/detail) surface, or hanging off the trunk of another model. Returns totals, perModel and a list of offenders (with tip positions to frame with df_camera_view center).',
     { maxOffenders: z.number().optional().describe('Max offenders listed (default 200).') },
