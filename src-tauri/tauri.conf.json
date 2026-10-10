@@ -5,7 +5,7 @@
   "identifier": "org.openresinalliance.dragonfruit",
   "build": {
     "beforeDevCommand": "npm run predev:once && npm run dev",
-    "beforeBuildCommand": "npm run build:tauri && node scripts/build-thumbnail-providers.mjs",
+    "beforeBuildCommand": "npm run build:tauri && node scripts/build-thumbnail-providers.mjs && node scripts/build-mcp-server.mjs",
     "devUrl": "http://localhost:3006",
     "frontendDist": "frontend-dist"
   },
@@ -29,7 +29,10 @@
       "icons/icon.ico",
       "icons/icon.icns",
       "icons/icon.png"
-    ]
+    ],
+    "resources": {
+      "mcp-resources/dragonfruit-mcp.cjs": "dragonfruit-mcp.cjs"
+    }
   },
   "plugins": {
     "updater": {

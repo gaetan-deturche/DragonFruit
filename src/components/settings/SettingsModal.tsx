@@ -10,6 +10,13 @@ import { PluginsSettingsTab } from '@/components/settings/PluginsSettingsTab';
 import { LocalBackupsSettingsTab } from '@/components/settings/LocalBackupsSettingsTab';
 import { SceneAutosaveSettingsTab } from '@/components/settings/SceneAutosaveSettingsTab';
 import { UvToolsSettingsTab } from '@/components/settings/UvToolsSettingsTab';
+import { AssistantSettingsTab } from '@/components/settings/AssistantSettingsTab';
+import {
+  DEFAULT_ASSISTANT_SETTINGS,
+  getSavedAssistantSettings,
+  saveAssistantSettings,
+  type AssistantSettings,
+} from '@/automation/assistantSettings';
 import { LoggingSettingsTab, getSavedLogLevel, saveLogLevel, type LogLevelFilter } from '@/components/settings/LoggingSettingsTab';
 import { SpaceMouseSettingsTab } from '@/components/settings/SpaceMouseSettingsTab';
 import { UISettingsTab } from './UISettingsTab';
@@ -17,7 +24,7 @@ import { UpdatesSettingsTab } from '@/features/updater/UpdatesSettingsTab';
 import { getUpdateChannel, type UpdateChannel } from '@/features/updater/updateBridge';
 import { WorkspacesSettingsTab } from '@/components/settings/WorkspacesSettingsTab';
 import { PerformanceSettingsTab, type SlicingThumbnailRenderSettings } from '@/components/settings/PerformanceSettingsTab';
-import { AlertTriangle, Check, CloudDownload, Edit3, ExternalLink, Gamepad2, Github, HardDrive, Info, Keyboard, MonitorCog, Palette, Plug, RotateCcw, Save, Settings2, Trash2, X, Camera, Grid3x3, ArchiveRestore, ScrollText } from 'lucide-react';
+import { AlertTriangle, Bot, Check, CloudDownload, Edit3, ExternalLink, Gamepad2, Github, HardDrive, Info, Keyboard, MonitorCog, Palette, Plug, RotateCcw, Save, Settings2, Trash2, X, Camera, Grid3x3, ArchiveRestore, ScrollText } from 'lucide-react';
 import type { MatcapVariant, MeshShaderType } from '@/features/shaders/mesh';
 import {
   applyThemeCustomColors,
@@ -201,7 +208,7 @@ type SettingsModalProps = {
   initialTab?: SettingsTabKey;
 };
 
-export type SettingsTabKey = 'general' | 'camera' | 'workspaces' | 'mesh' | 'performance' | 'spacemouse' | 'plugins' | 'sceneAutosave' | 'backups' | 'uvtools' | 'ui' | 'hotkeys' | 'logging' | 'updates' | 'about';
+export type SettingsTabKey = 'general' | 'camera' | 'workspaces' | 'mesh' | 'performance' | 'spacemouse' | 'plugins' | 'sceneAutosave' | 'backups' | 'uvtools' | 'assistant' | 'ui' | 'hotkeys' | 'logging' | 'updates' | 'about';
 type SettingsTabTone = 'primary' | 'secondary';
 
 export function SettingsModal({
@@ -312,6 +319,7 @@ export function SettingsModal({
   const [draftSlicingPerformanceSettings, setDraftSlicingPerformanceSettings] = useState<SlicingPerformanceSettings>(() => getSavedSlicingPerformanceSettings());
   const [draftSlicingThumbnailRenderSettings, setDraftSlicingThumbnailRenderSettings] = useState<SlicingThumbnailRenderSettings>(() => slicingThumbnailRenderSettings ?? DEFAULT_SLICING_THUMBNAIL_RENDER_SETTINGS);
   const [draftUvToolsSettings, setDraftUvToolsSettings] = useState<UvToolsSettings>(() => getSavedUvToolsSettings());
+  const [draftAssistantSettings, setDraftAssistantSettings] = useState<AssistantSettings>(() => getSavedAssistantSettings());
   const [draftLogLevel, setDraftLogLevel] = useState<LogLevelFilter>(() => getSavedLogLevel());
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable');
   const [showRestoreDefaultsConfirm, setShowRestoreDefaultsConfirm] = useState(false);
@@ -406,6 +414,7 @@ export function SettingsModal({
     setDraftSlicingPerformanceSettings(getSavedSlicingPerformanceSettings());
     setDraftSlicingThumbnailRenderSettings(slicingThumbnailRenderSettings ?? DEFAULT_SLICING_THUMBNAIL_RENDER_SETTINGS);
     setDraftUvToolsSettings(getSavedUvToolsSettings());
+    setDraftAssistantSettings(getSavedAssistantSettings());
     setDraftLogLevel(getSavedLogLevel());
     setDraftLocale(activeLocale);
   }, [
@@ -743,6 +752,7 @@ export function SettingsModal({
     setDraftSlicingPerformanceSettings(DEFAULT_SLICING_PERFORMANCE_SETTINGS);
     setDraftSlicingThumbnailRenderSettings(DEFAULT_SLICING_THUMBNAIL_RENDER_SETTINGS);
     setDraftUvToolsSettings(DEFAULT_UVTOOLS_SETTINGS);
+    setDraftAssistantSettings(DEFAULT_ASSISTANT_SETTINGS);
   }, []);
 
   const handleRestoreDefaults = React.useCallback(() => {
@@ -828,6 +838,7 @@ export function SettingsModal({
     });
     saveSlicingPerformanceSettings(draftSlicingPerformanceSettings);
     saveUvToolsSettings(draftUvToolsSettings);
+    saveAssistantSettings(draftAssistantSettings);
     onSlicingThumbnailRenderSettingsChange(draftSlicingThumbnailRenderSettings);
     const normalized3dView = normalizeView3DSettings(draftView3dSettings);
     saveView3DSettings(normalized3dView);
@@ -879,6 +890,7 @@ export function SettingsModal({
     draftSlicingPerformanceSettings,
     draftSlicingThumbnailRenderSettings,
     draftUvToolsSettings,
+    draftAssistantSettings,
     draftView3dSettings,
     draftXrayOpacity,
     draftHeatmapBlend,
@@ -1130,6 +1142,12 @@ export function SettingsModal({
       icon: ExternalLink,
       tone: 'secondary',
     },
+    assistant: {
+      label: 'AI Assistant',
+      description: 'Let an AI assistant drive DragonFruit (MCP)',
+      icon: Bot,
+      tone: 'secondary',
+    },
     logging: {
       label: 'Logging',
       description: 'Log file location and verbosity',
@@ -1151,7 +1169,7 @@ export function SettingsModal({
   };
 
   const sidebarTopTabs: SettingsTabKey[] = ['general', 'camera', 'workspaces', 'mesh', 'performance', 'spacemouse', 'ui', 'hotkeys'];
-  const sidebarBottomTabs: SettingsTabKey[] = ['plugins', 'sceneAutosave', 'backups', 'uvtools', 'logging', 'updates', 'about'];
+  const sidebarBottomTabs: SettingsTabKey[] = ['plugins', 'sceneAutosave', 'backups', 'uvtools', 'assistant', 'logging', 'updates', 'about'];
 
 
   const ActiveTabIcon = tabMeta[activeTab].icon;
@@ -1477,6 +1495,12 @@ export function SettingsModal({
                 <UvToolsSettingsTab
                   uvToolsSettings={draftUvToolsSettings}
                   onUvToolsSettingsChange={setDraftUvToolsSettings}
+                />
+              )}
+              {activeTab === 'assistant' && (
+                <AssistantSettingsTab
+                  assistantSettings={draftAssistantSettings}
+                  onAssistantSettingsChange={setDraftAssistantSettings}
                 />
               )}
               {activeTab === 'logging' && (

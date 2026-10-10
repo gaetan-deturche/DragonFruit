@@ -1,0 +1,17 @@
+{
+  "name": "dragonfruit-mcp",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server that lets an AI assistant (Claude Desktop / Claude Code) drive the DragonFruit resin slicer through its in-app automation bridge. Bundled into the app as dragonfruit-mcp.cjs by scripts/build-mcp-server.mjs.",
+  "bin": { "dragonfruit-mcp": "server.mjs" },
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.21.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
+}

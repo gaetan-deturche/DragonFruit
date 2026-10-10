@@ -10,7 +10,7 @@
     "generate:plugin-registry": "node scripts/generate-plugin-registry.mjs",
     "check:plugin-allowlist": "node scripts/check-complex-plugin-allowlist.mjs",
     "check:generated-plugin-registry": "node scripts/verify-generated-plugin-registry.mjs",
-    "predev:once": "node scripts/build-thumbnail-providers.mjs",
+    "predev:once": "node scripts/build-thumbnail-providers.mjs && node scripts/build-mcp-server.mjs",
     "predev": "npm run generate:plugin-registry && npm run generate:builtin-simple-plugins",
     "prebuild": "npm run generate:plugin-registry && npm run generate:builtin-simple-plugins",
     "prebuild:tauri": "npm run generate:plugin-registry && npm run generate:builtin-simple-plugins",
@@ -45,7 +45,8 @@
     "bench:voxl-tick": "node --max-old-space-size=8192 --import tsx scripts/bench-voxl-tick.ts",
     "i18n:extract": "lingui extract --clean",
     "i18n:compile": "lingui compile",
-    "i18n:update": "lingui extract --clean && lingui compile"
+    "i18n:update": "lingui extract --clean && lingui compile",
+    "build:mcp": "node scripts/build-mcp-server.mjs"
   },
   "dependencies": {
     "@lingui/core": "^6.3.0",

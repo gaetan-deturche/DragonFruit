@@ -70,6 +70,10 @@ jobs:
           # Signs the updater artifact (.sig). tauri.conf createUpdaterArtifacts=true.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Compile the AI-assistant (MCP) automation bridge into the release.
+          # At runtime it follows Settings > AI Assistant (ON by default) and
+          # only accepts an authenticated loopback peer (see src-tauri/src/automation.rs).
+          NEXT_PUBLIC_DF_AUTOMATION: "1"
         run: npm run tauri:build -- --bundles nsis
 
       - name: Upload installer (workflow artifact)

@@ -6,6 +6,7 @@ mod mesh_repair;
 mod network;
 mod sdf;
 mod updater_channel;
+mod automation;
 
 fn default_minimum_aa_alpha_percent() -> f32 {
     35.0
@@ -4107,6 +4108,9 @@ fn main() {
     let builder = builder.setup(|app| {
         let app_handle = app.handle().clone();
 
+        // Per-launch secret authenticating the automation (MCP) bridge.
+        automation::init(&app_handle);
+
         app.manage(window_state::WindowStateTracker::default());
 
         // Defer main window creation to an async task so the splashscreen's
@@ -4302,7 +4306,9 @@ fn main() {
             updater_channel::check_updates,
             updater_channel::perform_update,
             updater_channel::get_saved_update_channel,
-            updater_channel::save_update_channel
+            updater_channel::save_update_channel,
+            automation::automation_sign,
+            automation::get_automation_info
         ])
         .build(tauri::generate_context!())
         .expect("error while running DragonFruit desktop app")

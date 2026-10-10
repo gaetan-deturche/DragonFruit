@@ -85,3 +85,7 @@ src-tauri/binaries/dragonfruit-voxl-thumbnailer*
 *.swp
 *.swo
 *~
+
+# DragonFruit MCP server: bundled at build time (scripts/build-mcp-server.mjs)
+src-tauri/mcp-resources/
+tools/dragonfruit-mcp/node_modules/

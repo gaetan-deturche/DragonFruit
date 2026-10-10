@@ -1381,6 +1381,7 @@ dependencies = [
  "dragonfruit-slicing-engine",
  "flate2",
  "futures-util",
+ "getrandom 0.2.17",
  "if-addrs",
  "log",
  "meshopt",

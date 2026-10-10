@@ -6966,6 +6966,11 @@ export default function Home() {
     scanIslands: async () => { await islandsPoc.onRunScan(); },
     getUnsupportedIslandCount: () => islandsPoc.tableStats.allUnsupported,
     clearModels: async () => { await scene.deleteModels(scene.models.map((m) => m.id)); },
+    selectModel: (modelId) => {
+      if (!scene.models.some((m) => m.id === modelId)) return false;
+      scene.selectModel(modelId, 'single');
+      return true;
+    },
     autoOrient: (opts) => {
       const updates = autoOrientModelsRef.current('all', opts);
       return updates.map((u) => ({ id: u.id, ...u.result }));

@@ -1,23 +1,39 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import type { DetectedIsland } from '@/volumeAnalysis/Islands/types';
 import { getSettings } from '@/supports/Settings/state';
 import { getSnapshot } from '@/supports/state';
 import { runAutoPlace } from '@/supports/autoSupport';
 import type { AutoSupportSettings } from '@/supports/autoSupport/settings';
+import {
+    getSavedAssistantSettings,
+    setAssistantBridgeStatus,
+    subscribeToAssistantSettings,
+} from '@/automation/assistantSettings';
 
 /**
- * Automation bridge — lets an external MCP server drive DragonFruit for
- * scripted testing (mainly: iterate on auto-support and read back analytics
- * without a human clicking "Generate").
+ * Automation bridge — lets an AI assistant (through the bundled DragonFruit MCP
+ * server, tools/dragonfruit-mcp) drive the app: load/orient/arrange models,
+ * generate supports, inspect the viewport, export.
  *
  * It runs INSIDE the webview (as a hook mounted near the scene root) so it can
  * touch live React scene state — the model id, the scanned islands — that a
  * headless process cannot reach. It opens a WebSocket to the MCP server and
  * answers JSON commands.
  *
- * Protocol: the server sends `{ id, cmd, args? }`; the bridge replies
- * `{ id, ok, result? , error? }`. Only enabled when NEXT_PUBLIC_DF_AUTOMATION
- * is set (or always in dev), so production builds don't open a socket.
+ * Gating: compiled in when NEXT_PUBLIC_DF_AUTOMATION=1 (set by the release CI)
+ * or in dev; at runtime it follows Settings > AI Assistant (ON by default).
+ *
+ * Security: loopback URL only, and no command is accepted before a mutual
+ * HMAC handshake keyed by the per-launch token Rust writes for the server
+ * (src-tauri/src/automation.rs). The token never enters JS — we ask Rust to
+ * sign the challenges:
+ *   server → { type:'auth-challenge', nonce:S }
+ *   app    → { type:'auth-response', proof:HMAC('app:'+S), nonce:C }
+ *   server → { type:'auth-ok', proof:HMAC('server:'+C) }   (verified here)
+ *
+ * Protocol afterwards: the server sends `{ id, cmd, args? }`; the bridge replies
+ * `{ id, ok, result? , error? }`.
  */
 
 export interface ModelTransformOps {
@@ -56,6 +72,8 @@ export interface AutomationBridgeHandlers {
     listModels?: () => unknown;
     /** Remove all models from the scene (for scripted multi-model testing). */
     clearModels?: () => Promise<void>;
+    /** Make a model the single selected + active one (so transform/support commands target it). */
+    selectModel?: (modelId: string) => boolean;
     /** Trigger a fresh island scan; resolves when done. */
     scanIslands?: () => Promise<void>;
     /** Remove all existing supports (reset). */
@@ -79,6 +97,7 @@ type Command =
     | { id: number; cmd: 'autoOrient'; args?: { overhangAngleDeg?: number; heightWeight?: number; candidateCount?: number } }
     | { id: number; cmd: 'arrange'; args?: { mode?: 'standard' | 'high_precision' } }
     | { id: number; cmd: 'clearModels' }
+    | { id: number; cmd: 'selectModel'; args: { modelId: string } }
     | { id: number; cmd: 'scanIslands' }
     | { id: number; cmd: 'clearSupports' }
     | { id: number; cmd: 'generateSupports'; args?: { settings?: Partial<AutoSupportSettings> } }
@@ -100,6 +119,27 @@ type Command =
 const DEFAULT_URL = 'ws://127.0.0.1:8791';
 const RECONNECT_MS = 2000;
 
+/** Only ever dial a loopback MCP server (an override pointing elsewhere is ignored). */
+function resolveBridgeUrl(): string {
+    const override = process.env.NEXT_PUBLIC_DF_AUTOMATION_URL;
+    if (!override) return DEFAULT_URL;
+    try {
+        const u = new URL(override);
+        const loopback = ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(u.hostname);
+        return (u.protocol === 'ws:' || u.protocol === 'wss:') && loopback ? override : DEFAULT_URL;
+    } catch {
+        return DEFAULT_URL;
+    }
+}
+
+function randomHex(bytes: number): string {
+    const buf = new Uint8Array(bytes);
+    crypto.getRandomValues(buf);
+    return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+const signWithLaunchToken = (message: string) => invoke<string>('automation_sign', { message });
+
 function countSupports(): number {
     const s = getSnapshot();
     return (
@@ -120,13 +160,26 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
         ref.current = handlers;
     });
 
+    const assistantEnabled = useSyncExternalStore(
+        subscribeToAssistantSettings,
+        () => getSavedAssistantSettings().enabled,
+        () => false,
+    );
+
     useEffect(() => {
-        const enabled =
+        const compiledIn =
             process.env.NEXT_PUBLIC_DF_AUTOMATION === '1' ||
             process.env.NODE_ENV !== 'production';
-        if (!enabled || typeof window === 'undefined') return;
+        // The handshake needs Rust to sign with the launch token, so the bridge
+        // only runs inside the Tauri app (not a plain browser tab).
+        const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+        if (!compiledIn || !assistantEnabled || !inTauri) {
+            setAssistantBridgeStatus('disabled');
+            return;
+        }
+        setAssistantBridgeStatus('waiting');
 
-        const url = process.env.NEXT_PUBLIC_DF_AUTOMATION_URL || DEFAULT_URL;
+        const url = resolveBridgeUrl();
         let ws: WebSocket | null = null;
         let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
         let closed = false;
@@ -185,6 +238,12 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                     if (!h.clearModels) throw new Error('clearModels not wired');
                     await h.clearModels();
                     return { cleared: true };
+                }
+
+                case 'selectModel': {
+                    if (!h.selectModel) throw new Error('selectModel not wired');
+                    if (!h.selectModel(cmd.args.modelId)) throw new Error(`no model with id ${cmd.args.modelId}`);
+                    return { selected: cmd.args.modelId };
                 }
 
                 case 'scanIslands': {
@@ -321,22 +380,60 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
 
         const connect = () => {
             if (closed) return;
+            let sock: WebSocket;
             try {
-                ws = new WebSocket(url);
+                sock = new WebSocket(url);
             } catch {
                 reconnectTimer = setTimeout(connect, RECONNECT_MS);
                 return;
             }
-            ws.onopen = () => {
-                send({ event: 'hello', app: 'dragonfruit', ts: Date.now() });
+            ws = sock;
+            // Per-connection handshake state: nothing is executed until the
+            // server has proven it holds this launch's token.
+            let authed = false;
+            let authFailed = false;
+            let clientNonce = '';
+            const rejectPeer = () => {
+                authFailed = true;
+                setAssistantBridgeStatus('auth-failed');
+                try { sock.close(); } catch { /* ignore */ }
             };
-            ws.onmessage = async (ev) => {
-                let cmd: Command;
+
+            sock.onmessage = async (ev) => {
+                let msg: Record<string, unknown> | null;
                 try {
-                    cmd = JSON.parse(typeof ev.data === 'string' ? ev.data : '');
+                    msg = JSON.parse(typeof ev.data === 'string' ? ev.data : '');
                 } catch {
                     return;
                 }
+                if (!msg || typeof msg !== 'object') return;
+
+                if (!authed) {
+                    try {
+                        if (msg.type === 'auth-challenge' && typeof msg.nonce === 'string' && !clientNonce) {
+                            clientNonce = randomHex(32);
+                            const proof = await signWithLaunchToken(`app:${msg.nonce}`);
+                            sock.send(JSON.stringify({ type: 'auth-response', proof, nonce: clientNonce }));
+                            return;
+                        }
+                        if (msg.type === 'auth-ok' && clientNonce && typeof msg.proof === 'string') {
+                            const expected = await signWithLaunchToken(`server:${clientNonce}`);
+                            if (msg.proof === expected) {
+                                authed = true;
+                                setAssistantBridgeStatus('connected');
+                                return;
+                            }
+                        }
+                    } catch {
+                        // signing unavailable — treat as a failed handshake
+                    }
+                    // Anything else before a verified handshake (including a
+                    // command) means an unauthenticated peer: drop it.
+                    rejectPeer();
+                    return;
+                }
+
+                const cmd = msg as unknown as Command;
                 if (typeof cmd?.id !== 'number' || typeof cmd?.cmd !== 'string') return;
                 try {
                     const result = await handle(cmd);
@@ -345,11 +442,13 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                     send({ id: cmd.id, ok: false, error: e instanceof Error ? e.message : String(e) });
                 }
             };
-            ws.onclose = () => {
+            sock.onclose = () => {
+                if (ws === sock) ws = null;
+                if (!authFailed) setAssistantBridgeStatus('waiting');
                 if (!closed) reconnectTimer = setTimeout(connect, RECONNECT_MS);
             };
-            ws.onerror = () => {
-                try { ws?.close(); } catch { /* ignore */ }
+            sock.onerror = () => {
+                try { sock.close(); } catch { /* ignore */ }
             };
         };
 
@@ -359,6 +458,7 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
             closed = true;
             if (reconnectTimer) clearTimeout(reconnectTimer);
             try { ws?.close(); } catch { /* ignore */ }
+            setAssistantBridgeStatus('disabled');
         };
-    }, []);
+    }, [assistantEnabled]);
 }
