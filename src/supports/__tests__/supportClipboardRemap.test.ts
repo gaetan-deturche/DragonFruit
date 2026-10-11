@@ -1,7 +1,8 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import * as THREE from 'three';
-import { getSnapshot, resetStore } from '../state';
+import { getSnapshot, resetStore, setSnapshot } from '../state';
+import type { Anchor } from '../types';
 import {
   captureModelSupportsToClipboard,
   pasteModelSupportsFromClipboard,
@@ -409,5 +410,91 @@ describe('support clipboard remap isolation', () => {
     assert.ok(captured);
     assert.ok((captured?.roots.length ?? 0) > 0);
     assert.ok((captured?.trunks.length ?? 0) > 0);
+  });
+
+  it('copies anchors (and knots on anchor segments) with fresh ids, target modelId and translated positions', () => {
+    const anchor: Anchor = {
+      id: 'anchor-source',
+      modelId: SOURCE_MODEL_ID,
+      rootPos: makeVec3(2, 3, 0),
+      rootBaseDiameter: 2,
+      rootTopDiameter: 1,
+      rootHeight: 0.6,
+      joint: { id: 'anchor-joint-source', pos: makeVec3(2, 3, 1.5), diameter: 0.9 },
+      segments: [
+        {
+          id: 'anchor-seg-source',
+          type: 'straight',
+          diameter: 0.8,
+          bottomJoint: { id: 'anchor-j0-source', pos: makeVec3(2, 3, 0.6), diameter: 0.9 },
+          topJoint: { id: 'anchor-j1-source', pos: makeVec3(2, 3, 1.5), diameter: 0.9 },
+        },
+      ],
+      contactCone: {
+        id: 'anchor-cone-source',
+        pos: makeVec3(2, 3, 3),
+        normal: makeVec3(0, 0, 1),
+        profile: makeDiskProfile(),
+        socketJointId: 'anchor-socket-source',
+      },
+    };
+    setSnapshot({
+      ...getSnapshot(),
+      anchors: { [anchor.id]: anchor },
+      knots: {
+        'anchor-knot-source': {
+          id: 'anchor-knot-source',
+          parentShaftId: 'anchor-seg-source',
+          t: 0.5,
+          pos: makeVec3(2, 3, 1),
+          diameter: 0.7,
+        },
+      },
+    });
+
+    const payload = captureModelSupportsToClipboard(SOURCE_MODEL_ID);
+    assert.ok(payload, 'a model with only anchors must still produce a clipboard payload');
+    assert.strictEqual(payload?.anchors?.length, 1);
+    assert.strictEqual(payload?.knots.length, 1);
+
+    const identity = {
+      position: new THREE.Vector3(0, 0, 0),
+      rotation: new THREE.Euler(0, 0, 0),
+      scale: new THREE.Vector3(1, 1, 1),
+    };
+    const shifted = {
+      position: new THREE.Vector3(10, -5, 0),
+      rotation: new THREE.Euler(0, 0, 0),
+      scale: new THREE.Vector3(1, 1, 1),
+    };
+
+    const pastedCount = pasteModelSupportsFromClipboard(payload, TARGET_MODEL_ID, identity, shifted, { recordHistory: false });
+    assert.strictEqual(pastedCount, 1);
+
+    const state = getSnapshot();
+    assert.deepStrictEqual(state.anchors[anchor.id], anchor, 'source anchor must be untouched');
+
+    const pasted = Object.values(state.anchors).filter((item) => item.modelId === TARGET_MODEL_ID);
+    assert.strictEqual(pasted.length, 1);
+    const copy = pasted[0];
+    assert.notStrictEqual(copy.id, anchor.id);
+    assert.notStrictEqual(copy.joint.id, anchor.joint.id);
+    assert.notStrictEqual(copy.contactCone.id, anchor.contactCone.id);
+    assert.notStrictEqual(copy.contactCone.socketJointId, anchor.contactCone.socketJointId);
+    assert.notStrictEqual(copy.segments[0].id, anchor.segments[0].id);
+    assert.notStrictEqual(copy.segments[0].topJoint?.id, anchor.segments[0].topJoint?.id);
+
+    const close = (actual: { x: number; y: number; z: number }, expected: { x: number; y: number; z: number }) => {
+      assert.ok(Math.abs(actual.x - expected.x) < 1e-6 && Math.abs(actual.y - expected.y) < 1e-6 && Math.abs(actual.z - expected.z) < 1e-6,
+        `${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+    };
+    close(copy.rootPos, makeVec3(12, -2, 0));
+    close(copy.joint.pos, makeVec3(12, -2, 1.5));
+    close(copy.contactCone.pos, makeVec3(12, -2, 3));
+    close(copy.segments[0].bottomJoint!.pos, makeVec3(12, -2, 0.6));
+
+    const pastedKnots = Object.values(state.knots).filter((knot) => knot.id !== 'anchor-knot-source');
+    assert.strictEqual(pastedKnots.length, 1);
+    assert.strictEqual(pastedKnots[0].parentShaftId, copy.segments[0].id);
   });
 });

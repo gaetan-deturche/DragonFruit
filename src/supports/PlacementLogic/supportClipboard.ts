@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { getSnapshot, setSnapshot, transformSupportsForModel } from '@/supports/state';
-import type { Brace, Branch, Knot, Leaf, Roots, Stick, SupportState, Trunk, Twig } from '@/supports/types';
+import type { Anchor, Brace, Branch, Knot, Leaf, Roots, Stick, SupportState, Trunk, Twig } from '@/supports/types';
 import {
   getKickstandSnapshot,
   setKickstandSnapshot,
@@ -21,6 +21,8 @@ type SupportClipboardPayload = {
   twigs: Twig[];
   sticks: Stick[];
   braces: Brace[];
+  /** Optional so clipboard payloads captured before anchors were supported still paste. */
+  anchors?: Anchor[];
   knots: Knot[];
   kickstandRoots: Roots[];
   kickstandKnots: Knot[];
@@ -72,6 +74,7 @@ function extractSupportClipboardPayload(modelId: string): SupportClipboardPayloa
   const twigs = Object.values(state.twigs).filter((item) => item.modelId === modelId).map(clonePlain);
   const sticks = Object.values(state.sticks).filter((item) => item.modelId === modelId).map(clonePlain);
   const braces = Object.values(state.braces).filter((item) => item.modelId === modelId).map(clonePlain);
+  const anchors = Object.values(state.anchors ?? {}).filter((item) => item.modelId === modelId).map(clonePlain);
 
   const kickstands = Object.values(kickstandState.kickstands)
     .filter((item) => item.modelId === modelId)
@@ -90,6 +93,7 @@ function extractSupportClipboardPayload(modelId: string): SupportClipboardPayloa
   branches.forEach((item) => item.segments.forEach((segment) => includedSegmentIds.add(segment.id)));
   twigs.forEach((item) => item.segments.forEach((segment) => includedSegmentIds.add(segment.id)));
   sticks.forEach((item) => item.segments.forEach((segment) => includedSegmentIds.add(segment.id)));
+  anchors.forEach((item) => item.segments.forEach((segment) => includedSegmentIds.add(segment.id)));
   braces.forEach((item) => includedSegmentIds.add(`braceSegment:${item.id}`));
 
   const referencedKnotIds = new Set<string>();
@@ -126,6 +130,7 @@ function extractSupportClipboardPayload(modelId: string): SupportClipboardPayloa
     || twigs.length > 0
     || sticks.length > 0
     || braces.length > 0
+    || anchors.length > 0
     || knots.length > 0
     || kickstands.length > 0
     || kickstandRoots.length > 0
@@ -141,6 +146,7 @@ function extractSupportClipboardPayload(modelId: string): SupportClipboardPayloa
     twigs,
     sticks,
     braces,
+    anchors,
     knots,
     kickstandRoots,
     kickstandKnots,
@@ -344,6 +350,33 @@ function mergeSupportClipboardPayload(
     } as Brace;
   });
 
+  const clonedAnchors = (payload.anchors ?? []).map((anchor) => {
+    const clonedSegments = anchor.segments.map((segment) => {
+      const segmentId = getOrCreateMappedId(segment.id, segmentIdMap);
+      return {
+        ...clonePlain(segment),
+        id: segmentId,
+        topJoint: remapSupportJoint(segment.topJoint, jointIdMap),
+        bottomJoint: remapSupportJoint(segment.bottomJoint, jointIdMap),
+      };
+    });
+
+    return {
+      ...clonePlain(anchor),
+      id: uuidv4(),
+      modelId: targetModelId,
+      joint: remapSupportJoint(anchor.joint, jointIdMap) ?? clonePlain(anchor.joint),
+      segments: clonedSegments,
+      contactCone: {
+        ...clonePlain(anchor.contactCone),
+        id: uuidv4(),
+        socketJointId: anchor.contactCone.socketJointId
+          ? getOrCreateMappedId(anchor.contactCone.socketJointId, jointIdMap)
+          : anchor.contactCone.socketJointId,
+      },
+    } as Anchor;
+  });
+
   const clonedKnots = payload.knots.map((knot) => {
     const id = knotIdMap.get(knot.id) ?? uuidv4();
 
@@ -439,6 +472,10 @@ function mergeSupportClipboardPayload(
     braces: {
       ...state.braces,
       ...Object.fromEntries(clonedBraces.map((item) => [item.id, item])),
+    },
+    anchors: {
+      ...(state.anchors ?? {}),
+      ...Object.fromEntries(clonedAnchors.map((item) => [item.id, item])),
     },
     knots: {
       ...state.knots,
@@ -550,6 +587,9 @@ export function estimateSupportBoundsForModel(modelId: string): SupportModelBoun
     for (const stick of Object.values(state.sticks)) {
       if (stick.modelId === modelId && stick.segments.some((segment) => segment.id === parentShaftId)) return true;
     }
+    for (const anchor of Object.values(state.anchors ?? {})) {
+      if (anchor.modelId === modelId && anchor.segments.some((segment) => segment.id === parentShaftId)) return true;
+    }
 
     return false;
   };
@@ -606,6 +646,13 @@ export function estimateSupportBoundsForModel(modelId: string): SupportModelBoun
     expand(stick.contactConeB.pos, Math.max(0.001, stick.contactConeB.profile.contactDiameterMm / 2));
   });
 
+  Object.values(state.anchors ?? {}).filter((anchor) => anchor.modelId === modelId).forEach((anchor) => {
+    expand(anchor.rootPos, Math.max(0.001, anchor.rootBaseDiameter / 2));
+    expand(anchor.joint?.pos, Math.max(0.001, (anchor.joint?.diameter ?? anchor.rootTopDiameter) / 2));
+    expandSegments(anchor.segments as any[]);
+    expand(anchor.contactCone.pos, Math.max(0.001, anchor.contactCone.profile.contactDiameterMm / 2));
+  });
+
   Object.values(kickstandState.kickstands)
     .filter((kickstand) => kickstand.modelId === modelId)
     .forEach((kickstand) => expandSegments(kickstand.segments as any[]));
@@ -634,6 +681,7 @@ export function pasteModelSupportsFromClipboard(
     + payload.twigs.length
     + payload.sticks.length
     + payload.braces.length
+    + (payload.anchors?.length ?? 0)
     + payload.kickstands.length;
 
   if (hasSupports === 0) return 0;
