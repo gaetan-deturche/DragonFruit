@@ -315,6 +315,9 @@ export function buildTrunkData(input: TrunkBuildInput): TrunkBuildResult {
  * Returns a normal TrunkBuildResult on success, or one with error
  * 'COLLISION_WITH_MODEL' if no clear tilt/direction was found.
  */
+/** Max horizontal distance between an escape trunk's contact and its plate root. */
+const MAX_ESCAPE_OFFSET_MM = 15;
+
 export function buildEscapeTrunkData(input: TrunkBuildInput): TrunkBuildResult {
     const { tipPos, tipNormal, mesh, overrides } = input;
     const settings = getSettings();
@@ -346,6 +349,10 @@ export function buildEscapeTrunkData(input: TrunkBuildInput): TrunkBuildResult {
 
     for (const tiltDeg of TILTS_DEG) {
         const offset = runZ * Math.tan((tiltDeg * Math.PI) / 180);
+        // A tall contact tilted 48° lands 100+ mm away: a long, thin diagonal
+        // that whips at every peel and wanders across the plate. Past this
+        // horizontal reach an escape trunk is worse than no support.
+        if (offset > MAX_ESCAPE_OFFSET_MM) break;
         for (const yawDeg of YAWS_DEG) {
             const yaw = (yawDeg * Math.PI) / 180;
             const cos = Math.cos(yaw);
