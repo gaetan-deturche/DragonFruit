@@ -690,6 +690,7 @@ function resolveSupportSliceTessellation(
   for (const twig of Object.values(supportState.twigs)) segmentCount += twig.segments.length;
   for (const stick of Object.values(supportState.sticks)) segmentCount += stick.segments.length;
   for (const kickstand of Object.values(kickstandState.kickstands)) segmentCount += kickstand.segments.length;
+  for (const anchor of Object.values(supportState.anchors ?? {})) segmentCount += anchor.segments.length;
 
   const primitiveCount = segmentCount
     + Object.keys(supportState.roots).length
@@ -1070,6 +1071,48 @@ function buildSupportAndRaftWorldTriangles(
     const modelId = leaf.modelId;
     if (!modelId || !visibleModelIds.has(modelId)) continue;
     appendContactConePrimitive(sink, leaf.contactCone as any, tessellation.contactConeRadialSegments);
+  }
+
+  // Anchors (rootless struts from the model down to the plate). They were
+  // missing here entirely, so parts held only by anchors were sliced with
+  // nothing under them. Mirrors buildAnchorGroup (mesh export).
+  for (const anchor of Object.values(supportState.anchors ?? {})) {
+    if (!visibleModelIds.has(anchor.modelId)) continue;
+    const rootBase = new THREE.Vector3(anchor.rootPos.x, anchor.rootPos.y, anchor.rootPos.z);
+    const baseRadius = Math.max(0.05, anchor.rootBaseDiameter * 0.5);
+    const topRadius = Math.max(0.05, anchor.rootTopDiameter * 0.5);
+    if (rootBase.z > 0.001) {
+      // Anchors are not part of the raft footprint: always reach the plate.
+      const foot = createFrustumGeometryBetween(
+        new THREE.Vector3(rootBase.x, rootBase.y, 0), rootBase, baseRadius, baseRadius, tessellation.rootRadialSegments,
+      );
+      if (foot) {
+        appendGeometryTriangles(sink, foot);
+        foot.dispose();
+      }
+    }
+    const rootTop = rootBase.clone().add(new THREE.Vector3(0, 0, Math.max(0.01, anchor.rootHeight)));
+    const rootGeom = createFrustumGeometryBetween(rootBase, rootTop, baseRadius, topRadius, tessellation.rootRadialSegments);
+    if (rootGeom) {
+      appendGeometryTriangles(sink, rootGeom);
+      rootGeom.dispose();
+    }
+    if (anchor.joint && !seenJointIds.has(anchor.joint.id)) {
+      seenJointIds.add(anchor.joint.id);
+      appendJointSphere(sink, anchor.joint.pos, Math.max(0.001, anchor.joint.diameter - JOINT_BLEND_MM), tessellation.jointRadialSegments);
+    }
+    let current = new THREE.Vector3(anchor.joint.pos.x, anchor.joint.pos.y, anchor.joint.pos.z);
+    for (const seg of anchor.segments) {
+      const endPos = seg.topJoint ? seg.topJoint.pos : getFinalSocketPosition(anchor.contactCone as any);
+      const end = new THREE.Vector3(endPos.x, endPos.y, endPos.z);
+      appendSegmentPrimitive(sink, current, end, Math.max(0.05, seg.diameter), seg as any, segmentTessellation);
+      if (seg.topJoint && !seenJointIds.has(seg.topJoint.id)) {
+        seenJointIds.add(seg.topJoint.id);
+        appendJointSphere(sink, seg.topJoint.pos, Math.max(0.001, seg.topJoint.diameter - JOINT_BLEND_MM), tessellation.jointRadialSegments);
+      }
+      current = end;
+    }
+    appendContactConePrimitive(sink, anchor.contactCone as any, tessellation.contactConeRadialSegments);
   }
 
   for (const kickstand of Object.values(kickstandState.kickstands)) {
