@@ -23,6 +23,16 @@ const SHAFT_SAFETY_FACTOR = 3;
 /** Typical resin layer height, used to estimate the per-layer peel area of an
  *  inclined overhang (support settings do not carry the print layer height). */
 const LAYER_HEIGHT_FOR_SIZING_MM = 0.05;
+/**
+ * Stiffness floor for a trunk of free length L: d ≥ L / SLENDERNESS_LIMIT +
+ * STIFFNESS_BASE_MM. Tension alone (above) asks for ~0.8 mm whatever the
+ * height, but a long thin shaft is a spring: every peel tugs the hanging part
+ * sideways, the 0.8 mm × 100 mm trunks of a tall plate whipped, snapped
+ * mid-print and left the parts unformed. This keeps L/d ≲ 45-55 (≈1.3 mm at
+ * 50 mm, ≈2.2 mm at 100 mm), in line with what tall resin prints need.
+ */
+const SLENDERNESS_LIMIT = 55;
+const STIFFNESS_BASE_MM = 0.4;
 
 // ---------------------------------------------------------------------------
 // Override type
@@ -43,6 +53,9 @@ export interface SizeOverrides {
 export interface ModelSizingContext {
     /** Estimated model volume in mm³ (from bounding box or mesh). */
     modelVolumeMm3: number;
+    /** World Z of the model's top (mm). Weight above a candidate is
+     *  estimated from the share of the model height that lies above it. */
+    modelZMaxMm?: number;
     /** Total number of candidates being placed. */
     totalCandidates: number;
     /** Number of candidates at or below this candidate's Z height.
@@ -110,7 +123,9 @@ export function sizeParameters(
 
     const modelWeightG = ctx.modelVolumeMm3 * RESIN_DENSITY_G_PER_MM3;
     const zHeight = Math.max(candidate.zHeight, 1);
-    const modelZMax = Math.max(candidate.zHeight, 30);
+    // Was max(candidate.z, 30): any candidate above 30 mm got weightFraction 0
+    // (no carried weight at all) — exactly the tall trunks that carry most.
+    const modelZMax = Math.max(ctx.modelZMaxMm ?? 30, zHeight);
 
     // Count supports at or below this Z (including this one).
     const supportsBelow = ctx.candidatesBelowZ ?? ctx.totalCandidates;
@@ -144,8 +159,16 @@ export function sizeParameters(
     // asks for, so any candidate over ~16 mm² hit the 2 mm cap (overhang samples
     // are 36 mm² cells → every one of them a 2 mm trunk). Floor and cap unchanged.
     const requiredDiameterMm = Math.sqrt((4 * SHAFT_SAFETY_FACTOR * loadN) / (Math.PI * GREEN_RESIN_TENSILE_MPA));
+    // Free length ≈ tip height above the plate (the trunk drops to the plate).
+    const stiffnessDiameterMm = zHeight / SLENDERNESS_LIMIT + STIFFNESS_BASE_MM;
+    const strengthDiameterMm = clamp(
+        Math.max(shaftBase * 0.8, requiredDiameterMm),
+        MIN_SHAFT_DIAMETER_MM,
+        Math.min(MAX_SHAFT_DIAMETER_MM, shaftBase * 2.0),
+    );
+    // The stiffness floor may exceed the user-relative cap, up to the hard max.
     const shaftDiameterMm = round(
-        clamp(Math.max(shaftBase * 0.8, requiredDiameterMm), MIN_SHAFT_DIAMETER_MM, Math.min(MAX_SHAFT_DIAMETER_MM, shaftBase * 2.0)),
+        Math.max(strengthDiameterMm, Math.min(stiffnessDiameterMm, MAX_SHAFT_DIAMETER_MM)),
     3);
 
     // Tip contact: scaled by island area, but never thinner than 30%
@@ -153,7 +176,9 @@ export function sizeParameters(
     const ownArea = Math.max(candidate.islandAreaMm2, 0.01);
     const tipScale = clampStretch(ownArea, 0.05, 1.0, 0.5, 1.2);
     const tipContactDiameterMm = round(
-        clamp(tipContactBase * tipScale, shaftDiameterMm * 0.3, shaftDiameterMm * 0.6),
+        // Tied to the load-bearing (strength) section, not the stiffness
+        // floor: a tall trunk must not leave a bigger scar on the detail.
+        clamp(tipContactBase * tipScale, strengthDiameterMm * 0.3, strengthDiameterMm * 0.6),
     3);
     const tipBodyDiameterMm = shaftDiameterMm;
 
@@ -165,7 +190,8 @@ export function sizeParameters(
 
     // Root diameter: wider for taller/heavier supports.
     const rootScale = clamp(Math.sqrt(loadN) * 0.6, 0.8, 1.8);
-    const rootsDiameterMm = round(clamp(rootsDiaBase * rootScale, rootsDiaBase, 4.0), 3);
+    // The pad must also out-span a thick shaft (≥ 2× its diameter).
+    const rootsDiameterMm = round(clamp(Math.max(rootsDiaBase * rootScale, shaftDiameterMm * 2), rootsDiaBase, 4.0), 3);
 
     return {
         shaftDiameterMm,

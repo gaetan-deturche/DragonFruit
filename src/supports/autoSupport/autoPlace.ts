@@ -919,6 +919,7 @@ export function runAutoPlace(
             // whose contact cones then penetrate the model). Volume is rotation-
             // invariant, so this also makes sizing independent of orientation.
             modelVolumeMm3: computeMeshVolumeMm3(mesh),
+            modelZMaxMm: new THREE.Box3().setFromObject(mesh).max.z,
             totalCandidates: candidates.length,
             candidatesBelowZ: 0, // placeholder — filled per-candidate below
         };
