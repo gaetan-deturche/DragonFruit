@@ -98,6 +98,7 @@ type Command =
     | { id: number; cmd: 'arrange'; args?: { mode?: 'standard' | 'high_precision' } }
     | { id: number; cmd: 'clearModels' }
     | { id: number; cmd: 'selectModel'; args: { modelId: string } }
+    | { id: number; cmd: 'previewUpdate'; args?: { pct?: number } }
     | { id: number; cmd: 'scanIslands' }
     | { id: number; cmd: 'clearSupports'; args?: { scope?: 'active' | 'all' } }
     | { id: number; cmd: 'generateSupports'; args?: { settings?: Partial<AutoSupportSettings> } }
@@ -247,6 +248,13 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
                     if (!h.clearModels) throw new Error('clearModels not wired');
                     await h.clearModels();
                     return { cleared: true };
+                }
+
+                case 'previewUpdate': {
+                    // Fake update dialog (nothing downloaded / installed); with pct,
+                    // show the downloading state frozen at that percentage.
+                    window.dispatchEvent(new CustomEvent('dragonfruit:preview-update', { detail: { pct: cmd.args?.pct } }));
+                    return { shown: true, pct: cmd.args?.pct ?? null };
                 }
 
                 case 'selectModel': {

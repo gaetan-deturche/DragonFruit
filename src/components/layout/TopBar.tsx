@@ -540,22 +540,24 @@ export function TopBar({
     }
     return activePrinterProfile?.name ?? _(msg`Select printer`);
   }, [_, activePrinterProfile?.name, topbarFleetPrinterName, topbarUsesFleetLabelOrder]);
+  // One binding each for the two fleet labels below: declared in both memos,
+  // the React Compiler renamed the second pair (profileName_0…) before the
+  // Lingui macro ran, so that message no longer matched the catalogs and
+  // production printed its placeholders raw.
+  const profileName = activePrinterProfile?.name ?? _(msg`Select profile`);
+  const printerName = topbarFleetPrinterName ?? _(msg`No active printer`);
   const topbarPrinterButtonTitle = React.useMemo(() => {
     if (topbarUsesFleetLabelOrder) {
-      const profileName = activePrinterProfile?.name ?? _(msg`Select profile`);
-      const printerName = topbarFleetPrinterName ?? _(msg`No active printer`);
       return _(msg({ message: `Printer profile: ${profileName} • Active printer: ${printerName}`, comment: '"Printer profile" is the saved configuration (material, output format, etc.); "Active printer" is the physical network device currently connected under that profile. The two are distinct concepts that happen to both contain the word "printer".' }));
     }
     return activePrinterProfile ? _(msg`Printer profile: ${activePrinterProfile.name}`) : _(msg`Select printer profile`);
-  }, [_, activePrinterProfile, topbarFleetPrinterName, topbarUsesFleetLabelOrder]);
+  }, [_, activePrinterProfile, printerName, profileName, topbarUsesFleetLabelOrder]);
   const topbarPrinterButtonAriaLabel = React.useMemo(() => {
     if (topbarUsesFleetLabelOrder) {
-      const profileName = activePrinterProfile?.name ?? _(msg`Select profile`);
-      const printerName = topbarFleetPrinterName ?? _(msg`No active printer`);
       return _(msg({ message: `Printer profile ${profileName}, active printer ${printerName}`, comment: 'Same distinction as the title tooltip above (profile = saved configuration, printer = connected physical device), phrased for screen readers without the bullet separator.' }));
     }
     return activePrinterProfile ? _(msg`Printer profile ${activePrinterProfile.name}`) : _(msg`Select printer profile`);
-  }, [_, activePrinterProfile, topbarFleetPrinterName, topbarUsesFleetLabelOrder]);
+  }, [_, activePrinterProfile, printerName, profileName, topbarUsesFleetLabelOrder]);
   const monitorButtonAnimationClass = monitorButtonPaused
     ? 'ui-topbar-monitor-paused'
     : (monitorButtonActive ? 'ui-topbar-monitor-active' : '');

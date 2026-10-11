@@ -263,6 +263,11 @@ server.tool('df_reset_transform', 'Reset the active model position and rotation 
 server.tool('df_clear_models', 'Remove ALL models from the plate (fresh scene).',
     {}, async () => ok(await call('clearModels')));
 
+server.tool('df_preview_update_dialog',
+    'Show the in-app update dialog for a FAKE update (v9.9.9) to check its UI — nothing is downloaded or installed. Without pct: the "update available" dialog (its Download button then simulates a slow ~15 s download). With pct: the downloading state frozen at that percentage.',
+    { pct: z.number().min(0).max(100).optional() },
+    async ({ pct }) => ok(await call('previewUpdate', { pct })));
+
 server.tool('df_select_model',
     'Make a model (by id from df_list_models) the active/selected one, so transform, elevate and support tools target it.',
     { modelId: z.string() },

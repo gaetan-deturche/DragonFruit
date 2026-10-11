@@ -27,6 +27,10 @@ type IndicatorState =
 const STARTUP_CHECK_DELAY_MS = 5_000;
 const RE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const STORAGE_KEY_SUPPRESSED = 'dragonfruit-update-suppressed-version';
+/** Version of the dev/preview fake update (never a real release). */
+const FAKE_UPDATE_VERSION = '9.9.9';
+/** window event: open the fake update dialog, or with detail.pct show the downloading state at that %. */
+export const PREVIEW_UPDATE_EVENT = 'dragonfruit:preview-update';
 
 // ---------------------------------------------------------------------------
 // Component
@@ -91,23 +95,37 @@ export function GlobalUpdateIndicator() {
   }, []);
 
   // ── Dev shortcut: Ctrl+Shift+U ──────────────────────────────────────
+  // Also opened by the `dragonfruit:preview-update` window event. The fake
+  // update's "Download & install" only SIMULATES a slow download (nothing is
+  // fetched or installed) so the progress UI can be inspected — a real
+  // download is usually too fast to see.
   useEffect(() => {
+    const openFake = () => {
+      setState({
+        status: 'available',
+        info: {
+          version: FAKE_UPDATE_VERSION,
+          currentVersion: '0.1.7',
+          body: '## Dev fake release\n\nThis is a fake update triggered via Ctrl+Shift+U for testing the update notification UI.\n\n- Test item 1\n- Test item 2',
+          date: new Date().toISOString(),
+        },
+      });
+    };
     const handleKeyDown = (e: CustomEvent) => {
       const { key, ctrlKey, shiftKey } = e.detail;
-      if (ctrlKey && shiftKey && key.toLowerCase() === 'u') {
-        setState({
-          status: 'available',
-          info: {
-            version: '9.9.9',
-            currentVersion: '0.1.7',
-            body: '## Dev fake release\n\nThis is a fake update triggered via Ctrl+Shift+U for testing the update notification UI.\n\n- Test item 1\n- Test item 2',
-            date: new Date().toISOString(),
-          },
-        });
-      }
+      if (ctrlKey && shiftKey && key.toLowerCase() === 'u') openFake();
+    };
+    const handlePreview = (e: Event) => {
+      const previewPct = (e as CustomEvent<{ pct?: number } | undefined>).detail?.pct;
+      if (typeof previewPct === 'number') setState({ status: 'downloading', pct: Math.max(0, Math.min(100, Math.round(previewPct))) });
+      else openFake();
     };
     window.addEventListener('app-hotkey-keydown', handleKeyDown as EventListener);
-    return () => window.removeEventListener('app-hotkey-keydown', handleKeyDown as EventListener);
+    window.addEventListener(PREVIEW_UPDATE_EVENT, handlePreview);
+    return () => {
+      window.removeEventListener('app-hotkey-keydown', handleKeyDown as EventListener);
+      window.removeEventListener(PREVIEW_UPDATE_EVENT, handlePreview);
+    };
   }, []);
 
   // ── Handlers ────────────────────────────────────────────────────────
@@ -115,12 +133,22 @@ export function GlobalUpdateIndicator() {
     if (state.status !== 'available') return;
     setState({ status: 'downloading', pct: 0 });
 
+    if (state.info.version === FAKE_UPDATE_VERSION) {
+      // Fake update: walk the progress bar over ~15 s, then close.
+      for (let step = 0; step <= 100; step += 2) {
+        setState({ status: 'downloading', pct: step });
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      setState({ status: 'idle' });
+      return;
+    }
+
     const success = await downloadAndInstall((progress: DownloadProgress) => {
-      const pct =
+      const downloadedPct =
         progress.contentLength > 0
           ? Math.round((progress.downloaded / progress.contentLength) * 100)
           : 0;
-      setState({ status: 'downloading', pct });
+      setState({ status: 'downloading', pct: downloadedPct });
     });
 
     if (!success) {
@@ -153,6 +181,10 @@ export function GlobalUpdateIndicator() {
   const info = state.status === 'available' ? state.info : null;
   const isDownloading = state.status === 'downloading';
   const isError = state.status === 'error';
+  // Keep `pct` the only binding of that name in this component: the React
+  // Compiler renames shadowed bindings (pct → pct_2) BEFORE the Lingui macro
+  // runs, so <Trans>{pct}%</Trans> became "{pct_2}%", a message missing from
+  // the catalogs that production Lingui then printed raw, placeholder included.
   const pct = state.status === 'downloading' ? state.pct : 0;
 
   // Format the release date in the app's own locale, not the browser's — the
