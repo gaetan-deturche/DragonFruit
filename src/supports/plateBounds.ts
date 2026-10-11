@@ -23,6 +23,11 @@ let bounds: PlateBoundsXY | null = null;
 
 /** Keep the whole root disk on-plate, not just its center. */
 const EDGE_MARGIN_MM = 2;
+/**
+ * Extra room past the root disk for the raft that is grown around the roots
+ * (footprint margin + optional wall), so the raft outline stays on-plate too.
+ */
+const RAFT_MARGIN_MM = 1;
 
 export function setPlateBoundsXY(b: PlateBoundsXY | null): void {
     bounds = b;
@@ -32,11 +37,16 @@ export function hasPlateBounds(): boolean {
     return bounds != null;
 }
 
-/** True if a support root at (x,y) lands within the printable plate area. */
-export function isRootWithinPlate(x: number, y: number): boolean {
+/**
+ * True if a support root centered at (x,y) lands within the printable plate
+ * area. Pass the root disk radius so a wide pad (plus the raft around it) is
+ * kept fully on-plate, not just its center.
+ */
+export function isRootWithinPlate(x: number, y: number, rootRadiusMm = 0): boolean {
     if (!bounds) return true; // no limit configured
-    return x >= bounds.minX + EDGE_MARGIN_MM
-        && x <= bounds.maxX - EDGE_MARGIN_MM
-        && y >= bounds.minY + EDGE_MARGIN_MM
-        && y <= bounds.maxY - EDGE_MARGIN_MM;
+    const m = Math.max(EDGE_MARGIN_MM, rootRadiusMm + RAFT_MARGIN_MM);
+    return x >= bounds.minX + m
+        && x <= bounds.maxX - m
+        && y >= bounds.minY + m
+        && y <= bounds.maxY - m;
 }

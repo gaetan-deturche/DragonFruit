@@ -7025,12 +7025,17 @@ export default function Home() {
       return scene.models.filter((m) => m.visible).map((m) => {
         const t = m.transform;
         const dims = getModelSupportAwareDimensionsMm(m, undefined, t);
+        const bounds = computePreciseModelWorldBounds(m.geometry, t);
+        const r2 = (v: THREE.Vector3) => ({ x: +v.x.toFixed(2), y: +v.y.toFixed(2), z: +v.z.toFixed(2) });
         return {
           id: m.id,
           name: m.name,
           position: { x: +t.position.x.toFixed(2), y: +t.position.y.toFixed(2), z: +t.position.z.toFixed(2) },
           rotationDeg: { x: +(t.rotation.x * RAD2DEG).toFixed(1), y: +(t.rotation.y * RAD2DEG).toFixed(1), z: +(t.rotation.z * RAD2DEG).toFixed(1) },
           footprint: { w: +dims.width.toFixed(2), d: +dims.depth.toFixed(2), offX: +(dims.offsetX ?? 0).toFixed(2), offY: +(dims.offsetY ?? 0).toFixed(2) },
+          // Mesh-only world bounds — what the "outside build volume" warning tests.
+          boundsMm: { min: r2(bounds.min), max: r2(bounds.max) },
+          outsideBuildVolume: resinBuildVolumeBounds ? isBoundsOutsideVolume(bounds, resinBuildVolumeBounds, 0.01) : false,
         };
       });
     },
@@ -7081,7 +7086,14 @@ export default function Home() {
         }, 15000);
       });
     },
-    clearSupports: () => {
+    clearSupports: (opts) => {
+      if (opts?.scope !== 'all') {
+        const modelId = scene.activeModelId;
+        if (!modelId) throw new Error('no active model (pass scope "all" to clear the whole plate)');
+        scene.deleteSupportsForModels([modelId], 'Clear supports (assistant)');
+        setSupportRenderRefreshNonce((value) => value + 1);
+        return;
+      }
       const s = getSupportSnapshot();
       setSupportSnapshot({
         ...s,

@@ -180,8 +180,10 @@ server.tool('df_ping', 'Check the DragonFruit automation bridge is connected.',
 server.tool('df_scan_islands', 'Run a fresh island scan on the active model. Returns the new island count.',
     {}, async () => ok(await call('scanIslands', undefined, LONG_CALL_TIMEOUT_MS)));
 
-server.tool('df_clear_supports', 'Remove all supports from the active model.',
-    {}, async () => ok(await call('clearSupports')));
+server.tool('df_clear_supports',
+    'Remove the supports of the active model only (other models keep theirs). Pass scope "all" to clear the whole plate. Returns the plate-wide support count left.',
+    { scope: z.enum(['active', 'all']).optional().describe('"active" (default) = active model only; "all" = every model on the plate.') },
+    async ({ scope }) => ok(await call('clearSupports', { scope })));
 
 server.tool('df_generate_supports',
     'Run auto-support on the active model and return placement analytics (trunks, coverage, rejections). Optionally override auto-support settings for this run.',

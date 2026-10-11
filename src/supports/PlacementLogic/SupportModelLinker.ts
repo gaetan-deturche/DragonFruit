@@ -5,7 +5,7 @@ import { getKickstandSnapshot, setKickstandSnapshot } from '../SupportTypes/Kick
 type SupportCollectionsState = Pick<
     SupportState,
     'roots' | 'trunks' | 'branches' | 'braces' | 'leaves' | 'twigs' | 'sticks'
->;
+> & Partial<Pick<SupportState, 'anchors'>>;
 
 /**
  * SupportModelLinker
@@ -26,6 +26,7 @@ interface ModelSupportIds {
     leaves: string[];
     twigs: string[];
     sticks: string[];
+    anchors: string[];
 }
 
 /**
@@ -40,6 +41,7 @@ export function getSupportsForModel(state: SupportCollectionsState, modelId: str
         leaves: [],
         twigs: [],
         sticks: [],
+        anchors: [],
     };
 
     // Scan Roots
@@ -91,6 +93,13 @@ export function getSupportsForModel(state: SupportCollectionsState, modelId: str
         }
     }
 
+    // Scan Anchors (rootless struts from the model down to the plate)
+    for (const [id, anchor] of Object.entries(state.anchors ?? {})) {
+        if (anchor.modelId === modelId) {
+            result.anchors.push(id);
+        }
+    }
+
     return result;
 }
 
@@ -117,7 +126,8 @@ export function deleteSupportsForModel(state: SupportState, modelId: string): nu
         || ids.braces.length > 0
         || ids.leaves.length > 0
         || ids.twigs.length > 0
-        || ids.sticks.length > 0;
+        || ids.sticks.length > 0
+        || ids.anchors.length > 0;
 
     if (!hasMainSupportEntities && kickstandIdsToRemove.length === 0) {
         return 0;
@@ -130,6 +140,7 @@ export function deleteSupportsForModel(state: SupportState, modelId: string): nu
     const leavesToRemove = new Set(ids.leaves);
     const twigsToRemove = new Set(ids.twigs);
     const sticksToRemove = new Set(ids.sticks);
+    const anchorsToRemove = new Set(ids.anchors);
 
     const segmentsToRemove = new Set<string>();
     for (const trunkId of trunksToRemove) {
@@ -151,6 +162,11 @@ export function deleteSupportsForModel(state: SupportState, modelId: string): nu
         const stick = state.sticks[stickId];
         if (!stick) continue;
         for (const segment of stick.segments) segmentsToRemove.add(segment.id);
+    }
+    for (const anchorId of anchorsToRemove) {
+        const anchor = state.anchors[anchorId];
+        if (!anchor) continue;
+        for (const segment of anchor.segments) segmentsToRemove.add(segment.id);
     }
     for (const braceId of bracesToRemove) {
         const brace = state.braces[braceId];
@@ -188,6 +204,7 @@ export function deleteSupportsForModel(state: SupportState, modelId: string): nu
         leaves: filterRecord(state.leaves, (id) => leavesToRemove.has(id)),
         twigs: filterRecord(state.twigs, (id) => twigsToRemove.has(id)),
         sticks: filterRecord(state.sticks, (id) => sticksToRemove.has(id)),
+        anchors: filterRecord(state.anchors ?? {}, (id) => anchorsToRemove.has(id)),
         braces: filterRecord(state.braces, (id) => bracesToRemove.has(id)),
         knots: filterRecord(state.knots, (id) => knotsToRemove.has(id)),
         selectedId: null,
@@ -222,7 +239,8 @@ export function deleteSupportsForModel(state: SupportState, modelId: string): nu
         + ids.braces.length
         + ids.leaves.length
         + ids.twigs.length
-        + ids.sticks.length;
+        + ids.sticks.length
+        + ids.anchors.length;
 
     removedCount += kickstandIdsToRemove.length;
 

@@ -76,7 +76,8 @@ export interface AutomationBridgeHandlers {
     /** Trigger a fresh island scan; resolves when done. */
     scanIslands?: () => Promise<void>;
     /** Remove all existing supports (reset). */
-    clearSupports?: () => void;
+    /** Remove supports from the active model, or from every model with scope 'all'. */
+    clearSupports?: (opts?: { scope?: 'active' | 'all' }) => void;
     /** Export the current plate to a file path; resolves with the written path. */
     exportFile?: (path?: string) => Promise<string>;
     /** Load a mesh (STL/OBJ/3MF) from an absolute file path. */
@@ -98,7 +99,7 @@ type Command =
     | { id: number; cmd: 'clearModels' }
     | { id: number; cmd: 'selectModel'; args: { modelId: string } }
     | { id: number; cmd: 'scanIslands' }
-    | { id: number; cmd: 'clearSupports' }
+    | { id: number; cmd: 'clearSupports'; args?: { scope?: 'active' | 'all' } }
     | { id: number; cmd: 'generateSupports'; args?: { settings?: Partial<AutoSupportSettings> } }
     | { id: number; cmd: 'loadModel'; args: { path: string } }
     | { id: number; cmd: 'export'; args?: { path?: string } }
@@ -262,7 +263,7 @@ export function useAutomationBridge(handlers: AutomationBridgeHandlers): void {
 
                 case 'clearSupports': {
                     if (!h.clearSupports) throw new Error('clearSupports not wired');
-                    h.clearSupports();
+                    h.clearSupports({ scope: cmd.args?.scope });
                     return { supportCount: countSupports() };
                 }
 

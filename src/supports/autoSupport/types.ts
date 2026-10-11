@@ -57,6 +57,7 @@ export type RejectReason =
     | 'already_supported'
     | 'cross_model_collision'
     | 'up_facing_contact'
+    | 'off_plate'
     | 'exception';
 
 /** Detailed analytics from an auto-place run. */

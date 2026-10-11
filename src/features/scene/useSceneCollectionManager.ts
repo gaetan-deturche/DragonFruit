@@ -258,7 +258,8 @@ function hasSupportsOrKickstandsForModel(
     || supportIds.braces.length > 0
     || supportIds.leaves.length > 0
     || supportIds.twigs.length > 0
-    || supportIds.sticks.length > 0;
+    || supportIds.sticks.length > 0
+    || supportIds.anchors.length > 0;
   if (hasMainSupports) return true;
 
   return Object.values(kickstandState.kickstands).some((kickstand) => kickstand.modelId === modelId);
@@ -3392,7 +3393,8 @@ export function useSceneCollectionManager() {
         || supportIds.braces.length > 0
         || supportIds.leaves.length > 0
         || supportIds.twigs.length > 0
-        || supportIds.sticks.length > 0;
+        || supportIds.sticks.length > 0
+        || supportIds.anchors.length > 0;
 
       if (hasMainSupports) return true;
 
@@ -3438,7 +3440,8 @@ export function useSceneCollectionManager() {
           || remaining.braces.length > 0
           || remaining.leaves.length > 0
           || remaining.twigs.length > 0
-          || remaining.sticks.length > 0;
+          || remaining.sticks.length > 0
+          || remaining.anchors.length > 0;
 
         const hasRemainingKickstands = Object.values(getKickstandSnapshot().kickstands)
           .some((kickstand) => kickstand.modelId === modelId);
@@ -3483,7 +3486,8 @@ export function useSceneCollectionManager() {
         || supportIds.braces.length > 0
         || supportIds.leaves.length > 0
         || supportIds.twigs.length > 0
-        || supportIds.sticks.length > 0;
+        || supportIds.sticks.length > 0
+        || supportIds.anchors.length > 0;
 
       if (hasMainSupports) return true;
 

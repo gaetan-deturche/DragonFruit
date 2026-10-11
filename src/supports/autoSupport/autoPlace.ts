@@ -20,6 +20,8 @@ import { isShaftBlocked } from '../PlacementLogic/CollisionAvoidance';
 import { runAutoBracing } from '../autoBracing/autoBrace';
 import { pushHistory } from '@/history/historyStore';
 import { getModelMesh } from './meshStore';
+import { isRootWithinPlate } from '../plateBounds';
+import type { Roots } from '../types';
 import { generateOverhangCandidates, generateLowestPointCandidates } from './overhangSampling';
 import {
     collidesWithOtherModels,
@@ -425,6 +427,13 @@ function placeOneCandidate(
     const crossReject = {
         kind: 'reject', rejectedReason: 'cross_model_collision' as RejectReason, preset, detail: 'CROSS_MODEL_COLLISION',
     };
+    // Vertical / grid-routed trunks drop straight down from the tip, so a tip
+    // near the plate edge can put the root pad (and the raft around it) off-plate.
+    const offPlateReject = {
+        kind: 'reject', rejectedReason: 'off_plate' as RejectReason, preset, detail: 'ROOT_OFF_PLATE',
+    };
+    const rootOffPlate = (root: Roots) =>
+        !isRootWithinPlate(root.transform.pos.x, root.transform.pos.y, root.diameter / 2);
 
     // ── Gridless merge check ──────────────────────────────────────
     if (!supportSettings.grid?.enabled) {
@@ -629,7 +638,7 @@ function placeOneCandidate(
             const escape = buildEscapeTrunkData({
                 tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides, isPreview: false,
             });
-            if (!escape.error && !collidesWithOtherModels(trunkCapsulesOf(escape), candidate.modelId)) {
+            if (!escape.error && !rootOffPlate(escape.root) && !collidesWithOtherModels(trunkCapsulesOf(escape), candidate.modelId)) {
                 addRoot(escape.root);
                 addTrunk(escape.trunk);
                 console.log(LOG_PREFIX,
@@ -659,6 +668,7 @@ function placeOneCandidate(
 
     switch (decision.kind) {
         case 'place_trunk': {
+            if (rootOffPlate(decision.trunkBuild.root)) return offPlateReject;
             if (collidesWithOtherModels(trunkCapsulesOf(decision.trunkBuild), candidate.modelId)) return crossReject;
             const trunkId = decision.trunkBuild.trunk.id;
             addRoot(decision.trunkBuild.root);
@@ -716,6 +726,7 @@ function placeOneCandidate(
         }
 
         case 'replace_trunk':
+            if (rootOffPlate(decision.trunkBuild.root)) return offPlateReject;
             if (collidesWithOtherModels(trunkCapsulesOf(decision.trunkBuild), candidate.modelId)) return crossReject;
             // The old trunk gets removed by the caller (or we accept overwrite).
             // For now: add the new trunk and root.  The old trunk's root is

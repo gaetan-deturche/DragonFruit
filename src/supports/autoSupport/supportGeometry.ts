@@ -190,6 +190,8 @@ export interface SupportAuditResult {
     totals: SupportAuditModelStats;
     perModel: Record<string, SupportAuditModelStats>;
     trunks: Record<string, TrunkStats>;
+    /** XY extent of each model's support roots (base pads, pos ± diameter/2), mm. Rafts add a margin on top. */
+    rootBoundsXY: Record<string, { minX: number; maxX: number; minY: number; maxY: number }>;
     offenders: SupportAuditOffender[];
 }
 
@@ -318,5 +320,15 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         visit('stick', s.id, s.modelId, stickCapsules(s.segments, s.contactConeA, s.contactConeB), [s.contactConeA, s.contactConeB]);
     }
 
-    return { totals, perModel, trunks: trunkStats(), offenders };
+    const rootBoundsXY: SupportAuditResult['rootBoundsXY'] = {};
+    const r2 = (v: number) => Math.round(v * 100) / 100;
+    for (const root of Object.values(snap.roots)) {
+        const r = root.diameter / 2;
+        const { x, y } = root.transform.pos;
+        const b = (rootBoundsXY[root.modelId] ??= { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+        b.minX = Math.min(b.minX, r2(x - r)); b.maxX = Math.max(b.maxX, r2(x + r));
+        b.minY = Math.min(b.minY, r2(y - r)); b.maxY = Math.max(b.maxY, r2(y + r));
+    }
+
+    return { totals, perModel, trunks: trunkStats(), rootBoundsXY, offenders };
 }
