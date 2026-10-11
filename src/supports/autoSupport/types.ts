@@ -74,6 +74,8 @@ export interface AutoPlaceAnalytics {
     areaCoverage: number;
     /** Debug sizing info from the physics calculations. */
     sizingDebug?: SizingDebugInfo;
+    /** Post-placement leaf fanning: outcome counters (diagnostics). */
+    fanning?: Record<string, number>;
     /** Per-candidate reject details + uncovered island info (diagnostics). */
     debug?: {
         rejects: Array<{ id: string; source: string; err: string; z: number; nz: number }>;

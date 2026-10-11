@@ -214,7 +214,11 @@ interface MergeHost {
 // Leaf fan-out — max distance / angle constants
 // ---------------------------------------------------------------------------
 
-const LEAF_FAN_RADIUS_MM = 5.0;
+const LEAF_FAN_RADIUS_MM = 8.0;
+/** Shaft points tried per uncovered island (nearest first) before giving up. */
+const LEAF_FAN_MAX_TRIES = 12;
+/** A fan leaf's knot must sit at least this far below its tip. */
+const LEAF_FAN_MIN_DROP_MM = 0.8;
 const LEAF_FAN_MAX_ANGLE_DEG = 60;
 
 // ---------------------------------------------------------------------------
@@ -603,37 +607,40 @@ function placeOneCandidate(
     if (trunkResult.error) {
         // Cavity fallback: if the trunk can't reach the build plate, try
         // bridging to a lower surface with a Stick (model-to-model).
-        if (trunkResult.error === 'COLLISION_WITH_MODEL' && mesh && autoSettings.allowModelToModelSticks) {
-            // A model-to-model Stick/Twig is genuinely useful for a trapped
-            // overhang (e.g. hair strands caged above shoulders), but it marks
-            // BOTH surfaces it touches. When the vertical gap it bridges is tiny
-            // — the die case, where the overhang sits a fraction of a mm above
-            // the surface below — the stick holds nothing and just scars the
-            // print. Require a minimum vertical span so only load-bearing
-            // bridges survive; shorter ones return null and fall through to the
-            // escape trunk (reaches the plate) or a clean rejection.
-            const cavityResult = buildCavityStick(
-                tipPos, tipNormal, candidate.modelId, mesh, MIN_MODEL_TO_MODEL_Z_SPAN_MM,
-            );
-            if (cavityResult && cavityResult.kind === 'stick' && collidesWithOtherModels(
-                stickCapsules(cavityResult.stick.segments, cavityResult.stick.contactConeA, cavityResult.stick.contactConeB),
-                candidate.modelId,
-            )) {
-                console.log(LOG_PREFIX, `Stick (cavity) ${candidate.id}: runs through another model, skipped`);
-            } else if (cavityResult) {
-                if (cavityResult.kind === 'stick') {
-                    addStick(cavityResult.stick);
-                    console.log(LOG_PREFIX,
-                        `Stick (cavity) ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
-                    return { kind: 'stick', preset };
-                } else {
-                    addTwig(cavityResult.twig);
-                    console.log(LOG_PREFIX,
-                        `Twig (cavity) ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
-                    return { kind: 'twig', preset };
+        if (trunkResult.error === 'COLLISION_WITH_MODEL' && mesh) {
+            if (autoSettings.allowModelToModelSticks) {
+                // A model-to-model Stick/Twig is genuinely useful for a trapped
+                // overhang (e.g. hair strands caged above shoulders), but it marks
+                // BOTH surfaces it touches. When the vertical gap it bridges is tiny
+                // — the die case, where the overhang sits a fraction of a mm above
+                // the surface below — the stick holds nothing and just scars the
+                // print. Require a minimum vertical span so only load-bearing
+                // bridges survive; shorter ones return null and fall through to the
+                // escape trunk (reaches the plate) or a clean rejection.
+                const cavityResult = buildCavityStick(
+                    tipPos, tipNormal, candidate.modelId, mesh, MIN_MODEL_TO_MODEL_Z_SPAN_MM,
+                );
+                if (cavityResult && cavityResult.kind === 'stick' && collidesWithOtherModels(
+                    stickCapsules(cavityResult.stick.segments, cavityResult.stick.contactConeA, cavityResult.stick.contactConeB),
+                    candidate.modelId,
+                )) {
+                    console.log(LOG_PREFIX, `Stick (cavity) ${candidate.id}: runs through another model, skipped`);
+                } else if (cavityResult) {
+                    if (cavityResult.kind === 'stick') {
+                        addStick(cavityResult.stick);
+                        console.log(LOG_PREFIX,
+                            `Stick (cavity) ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
+                        return { kind: 'stick', preset };
+                    } else {
+                        addTwig(cavityResult.twig);
+                        console.log(LOG_PREFIX,
+                            `Twig (cavity) ${candidate.id} Z=${candidate.zHeight.toFixed(1)}mm`);
+                        return { kind: 'twig', preset };
+                    }
                 }
             }
-            // Angled-escape trunk: tilt the shaft outward to clear the model and
+            // Angled-escape trunk (independent of the stick setting — it lands
+            // on the plate, not on the model): tilt the shaft outward to clear the model and
             // reach the plate where a vertical/A*-routed trunk could not.
             const escape = buildEscapeTrunkData({
                 tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides, isPreview: false,
@@ -1123,7 +1130,10 @@ export function runAutoPlace(
         `Leaf fanning: ${analytics.islandsUncovered} uncovered islands, ${placedTrunks} trunks available. ` +
         `Max ${MAX_FANNING_PASSES} passes, fan radius ${LEAF_FAN_RADIUS_MM}mm, max angle ${LEAF_FAN_MAX_ANGLE_DEG}°.`);
 
+    const fan = { passes: 0, placed: 0, noShaftInRange: 0, noDownFacing: 0, tooShallow: 0, tooSteep: 0, trunkFull: 0, pathBlocked: 0, buildError: 0, coneCollides: 0, otherModel: 0 };
+    analytics.fanning = fan;
     for (let pass = 0; pass < MAX_FANNING_PASSES && analytics.islandsUncovered > 0; pass++) {
+        fan.passes++;
         const snap = getSnapshot();
 
         // Collect trunk shaft sample points from the current snapshot.
@@ -1175,74 +1185,74 @@ export function runAutoPlace(
             const cy = island.contact.y;
             const cz = island.contact.z;
 
-            let bestDist2 = Infinity;
-            let bestSP: typeof shaftPoints[0] | null = null;
+            // Try shaft points nearest-first. Only the single nearest one used
+            // to be tried, so an island next to a wall was dropped whenever that
+            // one point was blocked by the model, too steep or on a full trunk,
+            // even with a clear trunk a few mm further. The knot must sit BELOW
+            // the tip: a leaf hanging down onto a down-facing contact pulls the
+            // wrong way.
+            const ranked: Array<{ sp: typeof shaftPoints[0]; d2: number }> = [];
             for (const sp of shaftPoints) {
                 const dx = cx - sp.pos.x;
                 const dy = cy - sp.pos.y;
                 const dz = cz - sp.pos.z;
                 const d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 < bestDist2) { bestDist2 = d2; bestSP = sp; }
+                if (d2 <= fanR2) ranked.push({ sp, d2 });
             }
+            if (ranked.length === 0) { skippedDist++; fan.noShaftInRange++; continue; }
+            ranked.sort((p, q) => p.d2 - q.d2);
 
-            if (!bestSP || bestDist2 > fanR2) {
-                if (bestSP) skippedDist++;
-                continue;
-            }
-
-            const sp = bestSP;
-            const hDist = Math.sqrt((cx - sp.pos.x) ** 2 + (cy - sp.pos.y) ** 2);
-            const vDist = cz - sp.pos.z;
-            const absVDist = Math.abs(vDist);
-            if (absVDist < 0.01) { skippedSameZ++; continue; }
-            const angleFromVertical = Math.atan2(hDist, absVDist);
-            if (angleFromVertical > maxAngleRad) { skippedAngle++; continue; }
-
-            const parentKnot = {
-                id: uniqueKnotId(`auto-fan-${island.id}-p${pass}`),
-                parentShaftId: sp.trunkId,
-                pos: sp.pos,
-                diameter: sp.diameter + 0.1,
-            };
-
-            // SDF collision check: the straight path from knot to tip
-            // must be clear of the model.
             const leafMesh = getModelMesh(modelId);
-            if (leafMesh) {
-                const shaftRadius = 0.2; // leaf cone is thin
-                if (isShaftBlocked(sp.pos, { x: cx, y: cy, z: cz }, shaftRadius, leafMesh)) {
-                    continue;
-                }
-            }
+            const resolved = resolveDownFacingContact({ x: cx, y: cy, z: cz }, leafMesh ?? undefined);
+            if (!resolved) { fan.noDownFacing++; continue; }
+            const tip = resolved.point;
 
-            try {
-                const resolved = resolveDownFacingContact({ x: cx, y: cy, z: cz }, leafMesh ?? undefined);
-                if (!resolved) continue;
-                const { leaf, supportData: sd } = buildLeafData({
-                    tipPos: resolved.point,
-                    surfaceNormal: resolved.normal,
-                    modelId,
-                    parentKnot,
-                    hostDiameterMm: sp.diameter,
-                    mesh: leafMesh ?? undefined,
-                });
-                if (sd.error) continue;
-                if (collidesWithOtherModels(leafCapsules(parentKnot.pos, leaf.contactCone), modelId)) continue;
-                const fanCap = autoSettings.maxAttachmentsPerTrunk;
-                if (isTrunkAtAttachmentCapacity(sp.trunkId, fanCap)) {
-                    // Trunk full — skip this island for this pass.
-                    continue;
+            let tries = 0;
+            for (const { sp, d2 } of ranked) {
+                if (tries >= LEAF_FAN_MAX_TRIES) break;
+                const hDist = Math.sqrt((tip.x - sp.pos.x) ** 2 + (tip.y - sp.pos.y) ** 2);
+                const vDist = tip.z - sp.pos.z;
+                if (vDist < LEAF_FAN_MIN_DROP_MM) { skippedSameZ++; fan.tooShallow++; continue; }
+                const angleFromVertical = Math.atan2(hDist, vDist);
+                if (angleFromVertical > maxAngleRad) { skippedAngle++; fan.tooSteep++; continue; }
+                if (isTrunkAtAttachmentCapacity(sp.trunkId, autoSettings.maxAttachmentsPerTrunk)) { fan.trunkFull++; continue; }
+                tries++;
+
+                // The straight path from knot to tip must be clear of the model.
+                if (leafMesh && isShaftBlocked(sp.pos, tip, 0.2, leafMesh)) { fan.pathBlocked++; continue; }
+
+                const parentKnot = {
+                    id: uniqueKnotId(`auto-fan-${island.id}-p${pass}`),
+                    parentShaftId: sp.trunkId,
+                    pos: sp.pos,
+                    diameter: sp.diameter + 0.1,
+                };
+                try {
+                    const { leaf, supportData: sd } = buildLeafData({
+                        tipPos: tip,
+                        surfaceNormal: resolved.normal,
+                        modelId,
+                        parentKnot,
+                        hostDiameterMm: sp.diameter,
+                        mesh: leafMesh ?? undefined,
+                    });
+                    if (sd.error) { fan.buildError++; continue; }
+                    if (leafMesh && leafConeCollides(parentKnot.pos, leaf.contactCone, leafMesh)) { fan.coneCollides++; continue; }
+                    if (collidesWithOtherModels(leafCapsules(parentKnot.pos, leaf.contactCone), modelId)) { fan.otherModel++; continue; }
+                    addKnot(parentKnot);
+                    fan.placed++;
+                    addLeaf(leaf);
+                    fannedCount++;
+                    supportedIds.add(island.id);
+                    coveredArea += (island.areaMm2 ?? 0);
+                    console.log(LOG_PREFIX,
+                        `Leaf (fan p${pass}) ${island.id} → trunk ${sp.trunkId} ` +
+                        `dist=${Math.sqrt(d2).toFixed(1)}mm angle=${(angleFromVertical * 180 / Math.PI).toFixed(0)}°`);
+                    break;
+                } catch (e) {
+                    fan.buildError++;
+                    // Leaf build failed — try the next shaft point.
                 }
-                addKnot(parentKnot);
-                addLeaf(leaf);
-                fannedCount++;
-                supportedIds.add(island.id);
-                coveredArea += (island.areaMm2 ?? 0);
-                console.log(LOG_PREFIX,
-                    `Leaf (fan p${pass}) ${island.id} → trunk ${sp.trunkId} ` +
-                    `dist=${Math.sqrt(bestDist2).toFixed(1)}mm angle=${(angleFromVertical * 180 / Math.PI).toFixed(0)}°`);
-            } catch (e) {
-                // Leaf build failed — island stays uncovered.
             }
         }
 
