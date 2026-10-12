@@ -3,6 +3,8 @@ import { getTrunkSegmentEndpoints } from '../SupportPrimitives/Knot/knotUtils';
 import { getKickstandSnapshot } from '../SupportTypes/Kickstand/kickstandStore';
 import type * as THREE from 'three';
 import type { Vec3 } from '../types';
+import { seatingRing, SEAT_MIN_HITS } from './contactSeating';
+import { clampConeAxis } from './attachmentLimits';
 import type { ContactCone } from '../SupportPrimitives/ContactCone/types';
 import { getSnapshot } from '../state';
 import { isShaftBlocked } from '../PlacementLogic/CollisionAvoidance';
@@ -254,10 +256,16 @@ export interface SupportGeometryIssues {
     trunksInsidePart?: number;
     /** Contact cones whose axis lies more than 50° off straight down. */
     tiltedCones?: number;
+    /** Contact tips that do not reach the part (exact distance > 0.1 mm). */
+    detachedTips?: number;
+    /** Tips whose contact disk straddles an edge (part of it over the void). */
+    unseatedTips?: number;
     samples: Array<{ kind: string; issue: GeometryIssue; at: Vec3; detail: number }>;
 }
 
-type GeometryIssue = 'wall' | 'steep' | 'coneless' | 'kickstand' | 'tilted-cone' | 'inside-part';
+type GeometryIssue = 'wall' | 'steep' | 'coneless' | 'kickstand' | 'tilted-cone' | 'inside-part' | 'detached-tip' | 'unseated-tip';
+/** A contact tip further than this outside its part holds nothing (mm). */
+const DETACHED_TIP_MM = 0.1;
 /** Contact cone axis more than this off straight down (deg). */
 const TILTED_CONE_DEG = 50;
 
@@ -563,6 +571,35 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
             sample(t.modelId, 'trunk', 'inside-part', at, d);
         }
     }
+
+    // Tips that stop short of the part: a support that prints up to the part
+    // without fusing to it.
+    const checkTip = (kind: string, modelId: string, cone: ContactCone | undefined) => {
+        if (!cone) return;
+        const mesh = getModelMesh(modelId);
+        if (!mesh) return;
+        const sdf = getOrCreateSDFCache(mesh);
+        sdf.refreshMatrix();
+        const d = sdf.exactSignedDistanceAt(cone.pos.x, cone.pos.y, cone.pos.z);
+        if (d > DETACHED_TIP_MM) {
+            const e = g(modelId);
+            e.detachedTips = (e.detachedTips ?? 0) + 1;
+            sample(modelId, kind, 'detached-tip', cone.pos, d);
+        }
+        const dia = cone.profile?.contactDiameterMm ?? 0.4;
+        mesh.updateMatrixWorld();
+        // Same disk plane as placement: the clamped surface normal.
+        const ring = seatingRing(cone.pos, clampConeAxis(cone.surfaceNormal ?? cone.normal), dia / 2 + 0.05, mesh);
+        if (ring.hits < SEAT_MIN_HITS) {
+            const e = g(modelId);
+            e.unseatedTips = (e.unseatedTips ?? 0) + 1;
+            sample(modelId, kind, 'unseated-tip', cone.pos, ring.hits);
+        }
+    };
+    for (const t of Object.values(snap.trunks)) checkTip('trunk', t.modelId, t.contactCone);
+    for (const b of Object.values(snap.branches)) checkTip('branch', b.modelId, b.contactCone);
+    for (const l of Object.values(snap.leaves)) checkTip('leaf', l.modelId, l.contactCone);
+    for (const a of Object.values(snap.anchors)) checkTip('anchor', a.modelId, a.contactCone);
 
     const ks = getKickstandSnapshot();
     for (const k of Object.values(ks.kickstands)) {

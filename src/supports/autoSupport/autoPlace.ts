@@ -22,6 +22,7 @@ import { runAutoBracing } from '../autoBracing/autoBrace';
 import { pushHistory } from '@/history/historyStore';
 import { getModelMesh } from './meshStore';
 import { isRootWithinPlate } from '../plateBounds';
+import { seatContact } from './contactSeating';
 import { AUTO_ATTACH_MAX_ANGLE_DEG, AUTO_LEAF_MAX_SPAN_MM, MAX_CONE_TILT_DEG, angleFromVerticalDeg, clampConeAxis } from './attachmentLimits';
 import type { Roots, Trunk } from '../types';
 import { generateOverhangCandidates, generateLowestPointCandidates } from './overhangSampling';
@@ -476,6 +477,11 @@ function placeOneCandidate(
     }
     // Keep the contact cone close to vertical (edge/corner normals lie flat).
     tipNormal = clampConeAxis(tipNormal);
+    {
+        const seated = seatContact(tipPos, tipNormal, modelCtx?.minTipContactMm ?? 0.4, mesh);
+        tipPos = seated.point;
+        tipNormal = seated.normal;
+    }
 
     // Determine preset band for analytics.
     const area = candidate.islandAreaMm2;
@@ -1390,8 +1396,9 @@ export function runAutoPlace(
             ranked.sort((p, q) => p.d2 - q.d2);
 
             const leafMesh = getModelMesh(modelId);
-            const resolved = resolveDownFacingContact({ x: cx, y: cy, z: cz }, leafMesh ?? undefined);
-            if (!resolved) { fan.noDownFacing++; continue; }
+            const resolvedRaw = resolveDownFacingContact({ x: cx, y: cy, z: cz }, leafMesh ?? undefined);
+            if (!resolvedRaw) { fan.noDownFacing++; continue; }
+            const resolved = seatContact(resolvedRaw.point, clampConeAxis(resolvedRaw.normal), modelCtx?.minTipContactMm ?? 0.4, leafMesh ?? undefined);
             const tip = resolved.point;
 
             let tries = 0;
