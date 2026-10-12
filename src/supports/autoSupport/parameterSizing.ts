@@ -43,10 +43,11 @@ const TIP_SAFETY_FACTOR = 3;
 const MAX_REQUIRED_TIP_MM = 0.5;
 /**
  * Absolute floor for an auto-placed contact. 0.24 mm tips (5 LCD pixels) held
- * nothing in practice, even on a small 42 mm² part: below ~0.3 mm the cured
- * neck is too thin and too easily under-cured to carry its share of the peel.
+ * nothing in practice, even on a small 42 mm² part. A Chitubox slice of the
+ * same parts that printed fine had its thinnest 10 % of junctions at
+ * 0.28-0.47 mm and a 0.66-0.69 mm median.
  */
-const MIN_TIP_CONTACT_MM = 0.3;
+const MIN_TIP_CONTACT_MM = 0.35;
 /** Minimum depth a tip is sunk into the part (mm): ~4 layers at 0.05 mm. */
 const MIN_TIP_PENETRATION_MM = 0.2;
 

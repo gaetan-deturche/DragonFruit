@@ -58,8 +58,8 @@ test('model tip minimum raises the contact, within the shaft', () => {
     assert.ok(raised.tipContactDiameterMm! <= raised.shaftDiameterMm! * 0.8 + 1e-6);
 });
 
-test('no auto tip below 0.3 mm, sunk at least 0.2 mm', () => {
+test('no auto tip below 0.35 mm, sunk at least 0.2 mm', () => {
     const tiny = sizeParameters(candidate(5, 0.01), { ...ctx, minTipContactMm: 0.1 });
-    assert.ok(tiny.tipContactDiameterMm! >= 0.3 - 1e-6, `tip ${tiny.tipContactDiameterMm}`);
+    assert.ok(tiny.tipContactDiameterMm! >= 0.35 - 1e-6, `tip ${tiny.tipContactDiameterMm}`);
     assert.ok(tiny.tipPenetrationMm! >= 0.2 - 1e-6, `pen ${tiny.tipPenetrationMm}`);
 });

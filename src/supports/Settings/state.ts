@@ -67,7 +67,7 @@ function mergeWithDefaults(settings: SupportSettings): SupportSettings {
         autoBracing: mergedAutoBracing,
         autoSupport: normalizeAutoSupportSettings({
             ...defaults.autoSupport,
-            ...((settings as any).autoSupport ?? {}),
+            ...migrateAutoSupport((settings as any).autoSupport),
         }),
         devToolsEnabled: settings.devToolsEnabled !== undefined ? settings.devToolsEnabled : defaults.devToolsEnabled,
         devTools: settings.devTools ? { ...defaults.devTools, ...settings.devTools } : defaults.devTools,
@@ -88,6 +88,17 @@ function notify() {
 }
 
 // --- Getters ---
+
+/**
+ * Saved settings carry every auto-support field, so a changed default never
+ * reaches existing installs. The old overhang spacing default (6 mm) left parts
+ * hanging on too few contacts; drop it so the new default (2 mm) applies.
+ */
+function migrateAutoSupport(saved: Record<string, unknown> | undefined): Record<string, unknown> {
+    if (!saved) return {};
+    const { overhangSpacingMm, ...rest } = saved;
+    return overhangSpacingMm === 6 ? rest : saved;
+}
 
 export function getSettings(): SupportSettings {
     return currentSettings;
