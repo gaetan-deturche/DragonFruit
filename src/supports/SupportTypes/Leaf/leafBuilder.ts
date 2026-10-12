@@ -14,6 +14,9 @@ export interface LeafBuildInput {
     parentKnot: Knot;
     hostDiameterMm: number;
     mesh?: THREE.Mesh;
+    /** Contact (tip) diameter; defaults to the global tip setting. Auto-support
+     *  passes the model's required minimum so leaves hold their share of peel. */
+    contactDiameterMm?: number;
 }
 
 export interface LeafBuildResult {
@@ -65,7 +68,7 @@ export function buildLeafData(input: LeafBuildInput): LeafBuildResult {
 
     const baseProfile: SupportTipProfile = {
         type: 'disk',
-        contactDiameterMm: settings.tip.contactDiameterMm,
+        contactDiameterMm: Math.max(settings.tip.contactDiameterMm, input.contactDiameterMm ?? 0),
         bodyDiameterMm: hostDiameterMm,
         lengthMm: settings.tip.lengthMm,
         penetrationMm: settings.tip.penetrationMm,

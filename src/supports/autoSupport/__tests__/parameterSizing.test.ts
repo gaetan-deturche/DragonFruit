@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sizeParameters, type ModelSizingContext } from '../parameterSizing';
+import { sizeParameters, requiredTipContactDiameterMm, type ModelSizingContext } from '../parameterSizing';
 import type { CandidatePoint } from '../types';
 
 const candidate = (zHeight: number, islandAreaMm2 = 1): CandidatePoint => ({
@@ -38,4 +38,22 @@ test('candidates above 30 mm still carry model weight', () => {
     const d = sizeParameters(candidate(40, 0.01), heavy).shaftDiameterMm!;
     const stiffnessOnly = 40 / 55 + 0.4;
     assert.ok(d > stiffnessOnly + 0.1, `d ${d} should exceed the stiffness floor ${stiffnessOnly}`);
+});
+
+test('tip minimum covers the largest layer peel', () => {
+    // 516 mm² panel, ~170 contacts: total contact must hold 516·0.2·2 N at 10 MPa.
+    const d = requiredTipContactDiameterMm(516, 170);
+    const total = 170 * Math.PI * (d / 2) ** 2;
+    assert.ok(total >= (516 * 0.2 * 2) / 10 - 1e-6, `total ${total}`);
+    assert.ok(d > 0.36 && d <= 0.6, `d ${d}`);
+    assert.equal(requiredTipContactDiameterMm(5000, 10), 0.6); // capped
+    assert.equal(requiredTipContactDiameterMm(0, 10), 0);
+});
+
+test('model tip minimum raises the contact, within the shaft', () => {
+    const base = sizeParameters(candidate(20), ctx).tipContactDiameterMm!;
+    const raised = sizeParameters(candidate(20), { ...ctx, minTipContactMm: 0.5 });
+    assert.ok(base < 0.45, `base ${base}`);
+    assert.ok(raised.tipContactDiameterMm! >= 0.5 - 1e-6, `raised ${raised.tipContactDiameterMm}`);
+    assert.ok(raised.tipContactDiameterMm! <= raised.shaftDiameterMm! * 0.8 + 1e-6);
 });

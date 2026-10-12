@@ -86,6 +86,9 @@ export interface AutoPlaceAnalytics {
 /** Physics-based sizing debug data. */
 export interface SizingDebugInfo {
     modelVolumeMm3: number;
+    /** Largest layer cross-section of the model (mm²) and the tip minimum derived from it. */
+    maxCrossSectionMm2?: number;
+    minTipContactMm?: number;
     estimatedWeightG: number;
     totalCandidates: number;
     weightPerSupportG: number;

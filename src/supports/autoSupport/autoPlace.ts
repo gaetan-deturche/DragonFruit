@@ -5,7 +5,7 @@ function round2(v: number): number { return Math.round(v * 100) / 100; }
 import type { AutoSupportSettings } from './settings';
 import { normalizeAutoSupportSettings } from './settings';
 import { generateCandidates, deduplicateCandidates } from './candidateGeneration';
-import { sizeParameters } from './parameterSizing';
+import { sizeParameters, requiredTipContactDiameterMm } from './parameterSizing';
 import type { ModelSizingContext } from './parameterSizing';
 import { getSettings } from '../Settings/state';
 import { getSnapshot, addRoot, addTrunk, addBranch, addLeaf, addKnot, addAnchor, addStick, addTwig } from '../state';
@@ -520,6 +520,7 @@ function placeOneCandidate(
                             parentKnot,
                             hostDiameterMm: parentKnot.diameter ?? 1.0,
                             mesh,
+                            contactDiameterMm: modelCtx?.minTipContactMm,
                         });
                         if (sd.error) {
                             console.log(LOG_PREFIX,
@@ -777,6 +778,80 @@ function placeOneCandidate(
  * branch or leaf of the existing trunk.
  */
 /** Actual solid volume of a mesh in world mm³ (signed-tetrahedron sum × scale³). */
+/** Share of candidates expected to end up as real contacts (sizing estimate). */
+const EXPECTED_PLACED_FRACTION = 0.5;
+/** Z step between sampled cross-sections (mm). */
+const SECTION_STEP_MM = 0.5;
+
+/**
+ * Largest horizontal cross-section area of the mesh (world space, mm²), i.e.
+ * the biggest layer that will be peeled off the FEP. One pass over the
+ * triangles: each one adds its slice segment's shoelace term to every sampled Z
+ * it spans; segments are oriented by the triangle normal, so holes subtract and
+ * the sum is the enclosed area without stitching loops.
+ */
+export function computeMaxCrossSectionMm2(mesh: THREE.Mesh): number {
+    let max = 0;
+    for (const a of crossSectionAreasMm2(mesh)) if (a > max) max = a;
+    return max;
+}
+
+/** Cross-section area (mm²) every SECTION_STEP_MM from the mesh bottom up. */
+export function crossSectionAreasMm2(mesh: THREE.Mesh): Float64Array {
+    const geom = mesh.geometry;
+    const pos = geom.getAttribute('position');
+    if (!pos) return new Float64Array(0);
+    mesh.updateMatrixWorld(true);
+    const m = mesh.matrixWorld;
+    const index = geom.index;
+    const triCount = index ? index.count / 3 : pos.count / 3;
+    const box = new THREE.Box3().setFromObject(mesh);
+    const z0 = box.min.z;
+    const n = Math.max(1, Math.ceil((box.max.z - z0) / SECTION_STEP_MM));
+    const area = new Float64Array(n);
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    const ab = new THREE.Vector3(), ac = new THREE.Vector3(), nrm = new THREE.Vector3();
+    const vx = [0, 0, 0], vy = [0, 0, 0], vz = [0, 0, 0];
+
+    for (let t = 0; t < triCount; t++) {
+        const i0 = index ? index.getX(t * 3) : t * 3;
+        const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+        const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+        a.fromBufferAttribute(pos, i0).applyMatrix4(m);
+        b.fromBufferAttribute(pos, i1).applyMatrix4(m);
+        c.fromBufferAttribute(pos, i2).applyMatrix4(m);
+        nrm.crossVectors(ab.subVectors(b, a), ac.subVectors(c, a));
+        vx[0] = a.x; vx[1] = b.x; vx[2] = c.x;
+        vy[0] = a.y; vy[1] = b.y; vy[2] = c.y;
+        vz[0] = a.z; vz[1] = b.z; vz[2] = c.z;
+        const zmin = Math.min(a.z, b.z, c.z), zmax = Math.max(a.z, b.z, c.z);
+        const kFrom = Math.max(0, Math.ceil((zmin - z0) / SECTION_STEP_MM - 1e-9));
+        const kTo = Math.min(n - 1, Math.floor((zmax - z0) / SECTION_STEP_MM));
+        for (let k = kFrom; k <= kTo; k++) {
+            const z = z0 + k * SECTION_STEP_MM + 1e-6;
+            const px: number[] = [], py: number[] = [];
+            for (let e = 0; e < 3; e++) {
+                const f = (e + 1) % 3;
+                const za = vz[e], zb = vz[f];
+                if ((za < z) === (zb < z)) continue;
+                const s = (z - za) / (zb - za);
+                px.push(vx[e] + s * (vx[f] - vx[e]));
+                py.push(vy[e] + s * (vy[f] - vy[e]));
+            }
+            if (px.length !== 2) continue;
+            let x1 = px[0], y1 = py[0], x2 = px[1], y2 = py[1];
+            // Orient so the outward normal is on the right of (p1 → p2).
+            if ((y2 - y1) * nrm.x - (x2 - x1) * nrm.y < 0) {
+                [x1, x2] = [x2, x1];
+                [y1, y2] = [y2, y1];
+            }
+            area[k] += (x1 * y2 - x2 * y1) * 0.5;
+        }
+    }
+    for (let k = 0; k < n; k++) area[k] = Math.abs(area[k]);
+    return area;
+}
+
 function computeMeshVolumeMm3(mesh: THREE.Mesh): number {
     const geom = mesh.geometry;
     const pos = geom.getAttribute('position');
@@ -930,6 +1005,13 @@ export function runAutoPlace(
             totalCandidates: candidates.length,
             candidatesBelowZ: 0, // placeholder — filled per-candidate below
         };
+        modelCtx.maxCrossSectionMm2 = computeMaxCrossSectionMm2(mesh);
+        // Not every candidate ends up placed (rejects, merges): count on
+        // about half of them actually holding the part (the hollow sides: 142/286).
+        modelCtx.minTipContactMm = requiredTipContactDiameterMm(
+            modelCtx.maxCrossSectionMm2,
+            Math.max(8, candidates.length * EXPECTED_PLACED_FRACTION),
+        );
     }
 
     let placedTrunks = 0;
@@ -1091,6 +1173,8 @@ export function runAutoPlace(
         const sAvg = sizeParameters(makeSample(avgArea, zMax / 2), modelCtx, getSettings());
         sizingDebug = {
             modelVolumeMm3: Math.round(modelCtx.modelVolumeMm3),
+            maxCrossSectionMm2: Math.round(modelCtx.maxCrossSectionMm2 ?? 0),
+            minTipContactMm: round2(modelCtx.minTipContactMm ?? 0),
             estimatedWeightG: round2(weightG),
             totalCandidates: modelCtx.totalCandidates,
             weightPerSupportG: round2(weightG * (zMax / 2) / zMax), // mid-height support
@@ -1235,6 +1319,7 @@ export function runAutoPlace(
                         parentKnot,
                         hostDiameterMm: sp.diameter,
                         mesh: leafMesh ?? undefined,
+                        contactDiameterMm: modelCtx?.minTipContactMm,
                     });
                     if (sd.error) { fan.buildError++; continue; }
                     if (leafMesh && leafConeCollides(parentKnot.pos, leaf.contactCone, leafMesh)) { fan.coneCollides++; continue; }

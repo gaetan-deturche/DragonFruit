@@ -271,6 +271,7 @@ function tryBuildAutoLeafDecision(args: {
     modelId: string;
     settings: DecideGridPlacementArgs['settings'];
     mesh?: THREE.Mesh;
+    contactDiameterMm?: number;
 }): GridPlacementDecision | null {
     const { nodeKey, hostTrunkId, knot, tipPos, tipNormal, modelId, settings, mesh } = args;
     const dx = tipPos.x - knot.pos.x;
@@ -296,6 +297,7 @@ function tryBuildAutoLeafDecision(args: {
         parentKnot: knot,
         hostDiameterMm,
         mesh,
+        contactDiameterMm: args.contactDiameterMm,
     });
 
     return {
@@ -385,6 +387,7 @@ function findNeighborAttachment(args: {
     settings: DecideGridPlacementArgs['settings'];
     attachStepMm: number;
     mesh?: THREE.Mesh;
+    leafContactDiameterMm?: number;
 }): GridPlacementDecision | null {
     const [gxStr, gyStr] = args.nodeKey.split(',');
     const gx = Number(gxStr);
@@ -427,6 +430,7 @@ function findNeighborAttachment(args: {
                     tipNormal: args.tipNormal,
                     modelId: args.modelId,
                     settings: args.settings,
+                    contactDiameterMm: args.leafContactDiameterMm,
                 });
                 if (leafDecision) {
                     return leafDecision;
@@ -538,6 +542,7 @@ export function decideGridPlacement(args: DecideGridPlacementArgs): GridPlacemen
         }
 
         const neighborDecision = findNeighborAttachment({
+            leafContactDiameterMm: candidate.trunk?.contactCone?.profile?.contactDiameterMm,
             nodeKey,
             trunkGridMap,
             tipPos,
@@ -605,6 +610,7 @@ export function decideGridPlacement(args: DecideGridPlacementArgs): GridPlacemen
 
     if (!selectedKnot) {
         const neighborDecision = findNeighborAttachment({
+            leafContactDiameterMm: candidate.trunk?.contactCone?.profile?.contactDiameterMm,
             nodeKey,
             trunkGridMap,
             tipPos,
@@ -670,6 +676,7 @@ export function decideGridPlacement(args: DecideGridPlacementArgs): GridPlacemen
         tipNormal,
         modelId,
         settings,
+        contactDiameterMm: candidate.trunk?.contactCone?.profile?.contactDiameterMm,
     });
     if (leafDecision) {
         return leafDecision;

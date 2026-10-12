@@ -34,6 +34,30 @@ const LAYER_HEIGHT_FOR_SIZING_MM = 0.05;
 const SLENDERNESS_LIMIT = 55;
 const STIFFNESS_BASE_MM = 0.4;
 
+/** Peel/suction pull per mm² of the layer being separated from the FEP (N/mm²). */
+const LAYER_PEEL_N_PER_MM2 = 0.2;
+/** Safety factor on the total tip contact area vs the worst layer's peel. */
+const TIP_SAFETY_FACTOR = 2;
+/** Upper bound for the model-level tip minimum: bigger contacts scar details. */
+const MAX_REQUIRED_TIP_MM = 0.6;
+
+/**
+ * Every layer of a part is torn off the FEP as a whole, and that pull is carried
+ * by the support tips holding the part. Tip size used to depend only on the
+ * island each tip touches, so a part with a large cross-section (a solid front
+ * plate, a long side panel: 300-500 mm² per layer) hung on ~0.3 mm tips whose
+ * total contact (~10 mm²) sat right at the green-resin limit: the tips tore and
+ * the part stayed on the FEP. Size the tips so that all of them together hold
+ * the largest layer with a margin: A = maxSection · peel · SF / σ, shared over
+ * the expected number of contacts.
+ */
+export function requiredTipContactDiameterMm(maxSectionMm2: number, expectedContacts: number): number {
+    if (!(maxSectionMm2 > 0) || !(expectedContacts > 0)) return 0;
+    const totalAreaMm2 = (maxSectionMm2 * LAYER_PEEL_N_PER_MM2 * TIP_SAFETY_FACTOR) / GREEN_RESIN_TENSILE_MPA;
+    const perTipMm2 = totalAreaMm2 / expectedContacts;
+    return Math.min(MAX_REQUIRED_TIP_MM, Math.sqrt((4 * perTipMm2) / Math.PI));
+}
+
 // ---------------------------------------------------------------------------
 // Override type
 // ---------------------------------------------------------------------------
@@ -56,6 +80,11 @@ export interface ModelSizingContext {
     /** World Z of the model's top (mm). Weight above a candidate is
      *  estimated from the share of the model height that lies above it. */
     modelZMaxMm?: number;
+    /** Minimum contact (tip) diameter for this model, from its largest layer
+     *  cross-section — see requiredTipContactDiameterMm. */
+    minTipContactMm?: number;
+    /** Largest layer cross-section (mm²), for diagnostics. */
+    maxCrossSectionMm2?: number;
     /** Total number of candidates being placed. */
     totalCandidates: number;
     /** Number of candidates at or below this candidate's Z height.
@@ -178,7 +207,12 @@ export function sizeParameters(
     const tipContactDiameterMm = round(
         // Tied to the load-bearing (strength) section, not the stiffness
         // floor: a tall trunk must not leave a bigger scar on the detail.
-        clamp(tipContactBase * tipScale, strengthDiameterMm * 0.3, strengthDiameterMm * 0.6),
+        clamp(
+            Math.max(tipContactBase * tipScale, ctx.minTipContactMm ?? 0),
+            strengthDiameterMm * 0.3,
+            // The model-level minimum may exceed 0.6×shaft on thin shafts.
+            Math.max(strengthDiameterMm * 0.6, Math.min(ctx.minTipContactMm ?? 0, shaftDiameterMm * 0.8)),
+        ),
     3);
     const tipBodyDiameterMm = shaftDiameterMm;
 
