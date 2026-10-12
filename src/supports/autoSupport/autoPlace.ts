@@ -21,7 +21,7 @@ import { runAutoBracing } from '../autoBracing/autoBrace';
 import { pushHistory } from '@/history/historyStore';
 import { getModelMesh } from './meshStore';
 import { isRootWithinPlate } from '../plateBounds';
-import { AUTO_ATTACH_MAX_ANGLE_DEG, AUTO_LEAF_MAX_SPAN_MM, angleFromVerticalDeg } from './attachmentLimits';
+import { AUTO_ATTACH_MAX_ANGLE_DEG, AUTO_LEAF_MAX_SPAN_MM, MAX_CONE_TILT_DEG, angleFromVerticalDeg, clampConeAxis } from './attachmentLimits';
 import type { Roots } from '../types';
 import { generateOverhangCandidates, generateLowestPointCandidates } from './overhangSampling';
 import {
@@ -387,6 +387,21 @@ function findMergeHost(
  * This is the same sequence used by manual placement clicks.
  * Returns the decision kind so the orchestrator can tally.
  */
+/**
+ * The trunk router may shift the socket sideways to clear the model; the cone
+ * then follows that shift and can end up lying almost flat (a horizontal arm
+ * on an edge, even pointing upward). Such a contact pushes on the part instead
+ * of holding it: treat it like a blocked trunk so the fallbacks get a chance.
+ */
+const CONE_TILT_REJECT_DEG = MAX_CONE_TILT_DEG + 10;
+function trunkConeTooTilted(build: { trunk?: { contactCone?: { normal: { x: number; y: number; z: number } } } }): boolean {
+    const n = build.trunk?.contactCone?.normal;
+    if (!n) return false;
+    const len = Math.hypot(n.x, n.y, n.z) || 1;
+    const tilt = (Math.acos(Math.max(-1, Math.min(1, -n.z / len))) * 180) / Math.PI;
+    return tilt > CONE_TILT_REJECT_DEG;
+}
+
 function placeOneCandidate(
     candidate: CandidatePoint,
     autoSettings: AutoSupportSettings,
@@ -425,6 +440,8 @@ function placeOneCandidate(
     if (tipNormal.z > -0.05) {
         tipNormal = { x: 0, y: 0, z: -1 };
     }
+    // Keep the contact cone close to vertical (edge/corner normals lie flat).
+    tipNormal = clampConeAxis(tipNormal);
 
     // Determine preset band for analytics.
     const area = candidate.islandAreaMm2;
@@ -609,6 +626,9 @@ function placeOneCandidate(
         overrides,
         isPreview: false,
     });
+    if (!trunkResult.error && trunkConeTooTilted(trunkResult)) {
+        trunkResult = { ...trunkResult, error: 'COLLISION_WITH_MODEL' };
+    }
     // The model-level tip minimum widens the contact disk; in a tight spot
     // (a slot, a lip next to a wall) that wider disk can clip the model and
     // the whole support is lost. A thinner tip beats no support: retry with
@@ -619,7 +639,7 @@ function placeOneCandidate(
             const retry = buildTrunkData({
                 tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides: islandSized, isPreview: false,
             });
-            if (!retry.error) {
+            if (!retry.error && !trunkConeTooTilted(retry)) {
                 overrides = islandSized;
                 trunkResult = retry;
             }
@@ -667,7 +687,7 @@ function placeOneCandidate(
             const escape = buildEscapeTrunkData({
                 tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides, isPreview: false,
             });
-            if (!escape.error && !rootOffPlate(escape.root) && !collidesWithOtherModels(trunkCapsulesOf(escape), candidate.modelId)) {
+            if (!escape.error && !trunkConeTooTilted(escape) && !rootOffPlate(escape.root) && !collidesWithOtherModels(trunkCapsulesOf(escape), candidate.modelId)) {
                 addRoot(escape.root);
                 addTrunk(escape.trunk);
                 console.log(LOG_PREFIX,
@@ -698,6 +718,9 @@ function placeOneCandidate(
     switch (decision.kind) {
         case 'place_trunk': {
             if (rootOffPlate(decision.trunkBuild.root)) return offPlateReject;
+            if (trunkConeTooTilted(decision.trunkBuild)) {
+                return { kind: 'reject', rejectedReason: 'trunk_build_error', preset, detail: 'CONE_TOO_TILTED' };
+            }
             if (collidesWithOtherModels(trunkCapsulesOf(decision.trunkBuild), candidate.modelId)) return crossReject;
             const trunkId = decision.trunkBuild.trunk.id;
             addRoot(decision.trunkBuild.root);
@@ -756,6 +779,9 @@ function placeOneCandidate(
 
         case 'replace_trunk':
             if (rootOffPlate(decision.trunkBuild.root)) return offPlateReject;
+            if (trunkConeTooTilted(decision.trunkBuild)) {
+                return { kind: 'reject', rejectedReason: 'trunk_build_error', preset, detail: 'CONE_TOO_TILTED' };
+            }
             if (collidesWithOtherModels(trunkCapsulesOf(decision.trunkBuild), candidate.modelId)) return crossReject;
             // The old trunk gets removed by the caller (or we accept overwrite).
             // For now: add the new trunk and root.  The old trunk's root is
@@ -1335,7 +1361,7 @@ export function runAutoPlace(
                 try {
                     const { leaf, supportData: sd } = buildLeafData({
                         tipPos: tip,
-                        surfaceNormal: resolved.normal,
+                        surfaceNormal: clampConeAxis(resolved.normal),
                         modelId,
                         parentKnot,
                         hostDiameterMm: sp.diameter,

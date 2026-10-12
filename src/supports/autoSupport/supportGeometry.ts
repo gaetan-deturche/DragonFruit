@@ -1,3 +1,4 @@
+import { getTrunkSegmentEndpoints } from '../SupportPrimitives/Knot/knotUtils';
 import { getKickstandSnapshot } from '../SupportTypes/Kickstand/kickstandStore';
 import type * as THREE from 'three';
 import type { Vec3 } from '../types';
@@ -244,8 +245,14 @@ export interface SupportGeometryIssues {
     conelessTrunks: number;
     /** Auto-bracing kickstands (plate → elbow → host knot on a shaft). */
     kickstands?: number;
-    samples: Array<{ kind: string; issue: 'wall' | 'steep' | 'coneless' | 'kickstand'; at: Vec3; detail: number }>;
+    /** Contact cones whose axis lies more than 50° off straight down. */
+    tiltedCones?: number;
+    samples: Array<{ kind: string; issue: GeometryIssue; at: Vec3; detail: number }>;
 }
+
+type GeometryIssue = 'wall' | 'steep' | 'coneless' | 'kickstand' | 'tilted-cone';
+/** Contact cone axis more than this off straight down (deg). */
+const TILTED_CONE_DEG = 50;
 
 const WALL_NORMAL_Z = 0.34;
 const STEEP_SHAFT_DEG = 45;
@@ -388,7 +395,7 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
 
     const geometry: Record<string, SupportGeometryIssues> = {};
     const g = (modelId: string) => (geometry[modelId] ??= { wallContacts: 0, steepShafts: 0, conelessTrunks: 0, samples: [] });
-    const sample = (modelId: string, kind: string, issue: 'wall' | 'steep' | 'coneless' | 'kickstand', at: Vec3, detail: number) => {
+    const sample = (modelId: string, kind: string, issue: GeometryIssue, at: Vec3, detail: number) => {
         const e = g(modelId);
         if (e.samples.length < MAX_GEOMETRY_SAMPLES) e.samples.push({ kind, issue, at: { x: r2(at.x), y: r2(at.y), z: r2(at.z) }, detail: r2(detail) });
     };
@@ -396,6 +403,11 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         if (!cone) return;
         const nz = (cone.surfaceNormal ?? cone.normal).z;
         if (Math.abs(nz) < WALL_NORMAL_Z) { g(modelId).wallContacts++; sample(modelId, kind, 'wall', cone.pos, nz); }
+        // The cone's own axis (tip → socket): lying flat means a sideways arm.
+        const ax = cone.normal;
+        const axLen = Math.hypot(ax.x, ax.y, ax.z) || 1;
+        const tilt = (Math.acos(Math.max(-1, Math.min(1, -ax.z / axLen))) * 180) / Math.PI;
+        if (tilt > TILTED_CONE_DEG) { const e = g(modelId); e.tiltedCones = (e.tiltedCones ?? 0) + 1; sample(modelId, kind, 'tilted-cone', cone.pos, tilt); }
     };
     const checkShafts = (kind: string, modelId: string, caps: SupportCapsule[]) => {
         for (const c of caps) {
@@ -414,7 +426,16 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
             if (top) sample(t.modelId, 'trunk', 'coneless', top, 0);
         }
         checkCone('trunk', t.modelId, t.contactCone);
-        checkShafts('trunk', t.modelId, shaftEntityCapsules(t.segments, t.contactCone));
+        // Same endpoints the slicer prints (root top for the first segment,
+        // previous joint / cone socket otherwise): joint-less segments were
+        // skipped by the generic capsule builder.
+        const root = snap.roots[t.rootId];
+        const trunkCaps: SupportCapsule[] = [];
+        t.segments.forEach((seg, i) => {
+            const ep = getTrunkSegmentEndpoints(t, seg, i, root);
+            if (ep) trunkCaps.push({ a: ep.start, b: ep.end, r: (seg.diameter ?? 1) / 2, part: 'shaft' });
+        });
+        checkShafts('trunk', t.modelId, trunkCaps);
     }
     for (const b of Object.values(snap.branches)) {
         checkCone('branch', b.modelId, b.contactCone);

@@ -27,3 +27,26 @@ export function angleFromVerticalDeg(
     if (v <= 0) return 90;
     return (Math.atan2(h, v) * 180) / Math.PI;
 }
+
+/**
+ * Max tilt of a contact cone's axis from straight down (deg). The axis follows
+ * the (smoothed) surface normal; on an edge or corner that normal lies almost
+ * flat, so the cone stuck out sideways and the shaft had to elbow over to reach
+ * it — a horizontal arm pushing on the part instead of holding it from below.
+ */
+export const MAX_CONE_TILT_DEG = 40;
+
+/** Tilt an outward contact normal toward straight down so it stays within maxDeg. */
+export function clampConeAxis(
+    n: { x: number; y: number; z: number },
+    maxDeg = MAX_CONE_TILT_DEG,
+): { x: number; y: number; z: number } {
+    const len = Math.hypot(n.x, n.y, n.z) || 1;
+    const nx = n.x / len, ny = n.y / len, nz = n.z / len;
+    const tilt = (Math.acos(Math.max(-1, Math.min(1, -nz))) * 180) / Math.PI;
+    if (tilt <= maxDeg) return { x: nx, y: ny, z: nz };
+    const h = Math.hypot(nx, ny);
+    if (h < 1e-9) return { x: 0, y: 0, z: -1 };
+    const r = (maxDeg * Math.PI) / 180;
+    return { x: (nx / h) * Math.sin(r), y: (ny / h) * Math.sin(r), z: -Math.cos(r) };
+}
