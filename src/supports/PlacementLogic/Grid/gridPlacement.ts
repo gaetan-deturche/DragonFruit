@@ -20,6 +20,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { buildAnchorData } from '../../SupportTypes/Anchor/anchorBuilder';
 import { buildLeafData } from '../../SupportTypes/Leaf/leafBuilder';
 import { perfMark, perfMeasureWithSpike } from '../Pathfinding/pathfindingPerf';
+import { AUTO_ATTACH_MAX_ANGLE_DEG } from '../../autoSupport/attachmentLimits';
 
 const MIN_TRUNK_CLEARANCE_MM = 0.05;
 const ANCHOR_HEIGHT_THRESHOLD_MM = 5.0;
@@ -286,7 +287,8 @@ function tryBuildAutoLeafDecision(args: {
     const angleFromUpDeg = spanSq < 0.000001
         ? 0
         : THREE.MathUtils.radToDeg(Math.acos(Math.min(1, Math.max(-1, dz / spanMm))));
-    const maxAngleDeg = settings.shaft.maxAngleDeg ?? 80;
+    // Auto leaves stay steep: an inclined leaf carries the peel in bending.
+    const maxAngleDeg = Math.min(settings.shaft.maxAngleDeg ?? 80, AUTO_ATTACH_MAX_ANGLE_DEG);
     if (angleFromUpDeg > maxAngleDeg) return null;
 
     const hostDiameterMm = getHostDiameterMmFromKnot(knot, settings);

@@ -21,6 +21,7 @@ import { runAutoBracing } from '../autoBracing/autoBrace';
 import { pushHistory } from '@/history/historyStore';
 import { getModelMesh } from './meshStore';
 import { isRootWithinPlate } from '../plateBounds';
+import { AUTO_ATTACH_MAX_ANGLE_DEG, AUTO_LEAF_MAX_SPAN_MM, angleFromVerticalDeg } from './attachmentLimits';
 import type { Roots } from '../types';
 import { generateOverhangCandidates, generateLowestPointCandidates } from './overhangSampling';
 import {
@@ -214,12 +215,12 @@ interface MergeHost {
 // Leaf fan-out — max distance / angle constants
 // ---------------------------------------------------------------------------
 
-const LEAF_FAN_RADIUS_MM = 8.0;
+const LEAF_FAN_RADIUS_MM = AUTO_LEAF_MAX_SPAN_MM;
 /** Shaft points tried per uncovered island (nearest first) before giving up. */
 const LEAF_FAN_MAX_TRIES = 12;
 /** A fan leaf's knot must sit at least this far below its tip. */
 const LEAF_FAN_MIN_DROP_MM = 0.8;
-const LEAF_FAN_MAX_ANGLE_DEG = 60;
+const LEAF_FAN_MAX_ANGLE_DEG = AUTO_ATTACH_MAX_ANGLE_DEG;
 
 // ---------------------------------------------------------------------------
 // Leaf cone triangle collision
@@ -496,8 +497,12 @@ function placeOneCandidate(
                 (tipPos.y - hostTip.y) ** 2 +
                 (tipPos.z - hostTip.z) ** 2,
             );
-            const MAX_AUTO_LEAF_SPAN_MM = 8.0;
-            if (tipSpanMm <= MAX_AUTO_LEAF_SPAN_MM) {
+            const MAX_AUTO_LEAF_SPAN_MM = AUTO_LEAF_MAX_SPAN_MM;
+            const leafAngleDeg = angleFromVerticalDeg(knotPos, tipPos);
+            if (tipSpanMm <= MAX_AUTO_LEAF_SPAN_MM && leafAngleDeg > AUTO_ATTACH_MAX_ANGLE_DEG) {
+                console.log(LOG_PREFIX,
+                    `Leaf (merge) ${candidate.id}: too inclined (${leafAngleDeg.toFixed(0)}° > ${AUTO_ATTACH_MAX_ANGLE_DEG}°), standalone trunk instead`);
+            } else if (tipSpanMm <= MAX_AUTO_LEAF_SPAN_MM) {
                 // Knot attachment is on the shaft; angle check uses the
                 // actual knot-to-tip geometry for the leaf cone.
                 const hDist = Math.sqrt(
@@ -556,9 +561,9 @@ function placeOneCandidate(
                 );
                 const vDist2 = tipPos.z - knotPos.z;
                 const mergeAngleDeg = (Math.atan2(hDist2, vDist2) * 180) / Math.PI;
-                if (mergeAngleDeg > 50) {
+                if (mergeAngleDeg > AUTO_ATTACH_MAX_ANGLE_DEG) {
                     console.log(LOG_PREFIX,
-                        `Merge skip ${candidate.id}: angle too steep (${mergeAngleDeg.toFixed(0)}° > 50°) span=${tipSpanMm.toFixed(1)}mm`);
+                        `Merge skip ${candidate.id}: angle too steep (${mergeAngleDeg.toFixed(0)}° > ${AUTO_ATTACH_MAX_ANGLE_DEG}°) span=${tipSpanMm.toFixed(1)}mm`);
                 } else try {
                     const { branch, supportData: sd } = buildBranchData({
                         tipPos, tipNormal, modelId: candidate.modelId, parentKnot, mesh,

@@ -19,6 +19,7 @@ import { calculateStandardPlacement, type TrunkPlacementResult } from '../../Pla
 import { calculateSmartPlacementV2 } from '../../PlacementLogic/Pathfinding';
 import { isShaftBlocked } from '../../PlacementLogic/CollisionAvoidance';
 import { isRootWithinPlate } from '../../plateBounds';
+import { ESCAPE_TRUNK_TILTS_DEG } from '../../autoSupport/attachmentLimits';
 import type { LimitationCode, WarningCode } from '../../types';
 import type { SnappedTrunkRouteResult, TrunkRouteResult } from './trunkRouteTypes';
 import { gridSnappedXYFromKey } from '../../PlacementLogic/Grid/gridMath';
@@ -344,7 +345,8 @@ export function buildEscapeTrunkData(input: TrunkBuildInput): TrunkBuildResult {
     const hy = tipNormal.y / hLen;
 
     const clearanceR = shaftRadius + 0.2;
-    const TILTS_DEG = [18, 26, 34, 42, 48];
+    // Steep tilts only: a strongly leaning shaft flexes under every peel.
+    const TILTS_DEG = ESCAPE_TRUNK_TILTS_DEG;
     const YAWS_DEG = [0, 22, -22, 44, -44];
 
     for (const tiltDeg of TILTS_DEG) {
