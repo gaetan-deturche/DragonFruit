@@ -22,7 +22,7 @@ import { runAutoBracing } from '../autoBracing/autoBrace';
 import { pushHistory } from '@/history/historyStore';
 import { getModelMesh } from './meshStore';
 import { isRootWithinPlate } from '../plateBounds';
-import { seatContact } from './contactSeating';
+import { seatContact, seatingStats, resetSeatingStats } from './contactSeating';
 import { AUTO_ATTACH_MAX_ANGLE_DEG, AUTO_LEAF_MAX_SPAN_MM, MAX_CONE_TILT_DEG, angleFromVerticalDeg, clampConeAxis } from './attachmentLimits';
 import type { Roots, Trunk } from '../types';
 import { generateOverhangCandidates, generateLowestPointCandidates } from './overhangSampling';
@@ -478,7 +478,8 @@ function placeOneCandidate(
     // Keep the contact cone close to vertical (edge/corner normals lie flat).
     tipNormal = clampConeAxis(tipNormal);
     {
-        const seated = seatContact(tipPos, tipNormal, modelCtx?.minTipContactMm ?? 0.4, mesh);
+        const isLowestPoint = candidate.source !== 'overhang' || candidate.id.startsWith('lowest-');
+        const seated = seatContact(tipPos, tipNormal, modelCtx?.minTipContactMm ?? 0.4, mesh, isLowestPoint);
         tipPos = seated.point;
         tipNormal = seated.normal;
     }
@@ -989,6 +990,7 @@ export function runAutoPlace(
     modelId: string,
     settingsOverride?: Partial<AutoSupportSettings>,
 ): AutoPlaceResult {
+    resetSeatingStats();
     // ------------------------------------------------------------------
     // 0. Settings
     // ------------------------------------------------------------------
@@ -1325,6 +1327,7 @@ export function runAutoPlace(
 
     const fan = { passes: 0, placed: 0, noShaftInRange: 0, noDownFacing: 0, tooShallow: 0, tooSteep: 0, trunkFull: 0, pathBlocked: 0, buildError: 0, coneCollides: 0, otherModel: 0 };
     analytics.fanning = fan;
+    analytics.seating = seatingStats; // live: fanned leaves add to it
     for (let pass = 0; pass < MAX_FANNING_PASSES && analytics.islandsUncovered > 0; pass++) {
         fan.passes++;
         const snap = getSnapshot();
@@ -1398,7 +1401,7 @@ export function runAutoPlace(
             const leafMesh = getModelMesh(modelId);
             const resolvedRaw = resolveDownFacingContact({ x: cx, y: cy, z: cz }, leafMesh ?? undefined);
             if (!resolvedRaw) { fan.noDownFacing++; continue; }
-            const resolved = seatContact(resolvedRaw.point, clampConeAxis(resolvedRaw.normal), modelCtx?.minTipContactMm ?? 0.4, leafMesh ?? undefined);
+            const resolved = seatContact(resolvedRaw.point, clampConeAxis(resolvedRaw.normal), modelCtx?.minTipContactMm ?? 0.4, leafMesh ?? undefined, true);
             const tip = resolved.point;
 
             let tries = 0;

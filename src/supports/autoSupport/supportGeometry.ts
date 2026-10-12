@@ -3,7 +3,7 @@ import { getTrunkSegmentEndpoints } from '../SupportPrimitives/Knot/knotUtils';
 import { getKickstandSnapshot } from '../SupportTypes/Kickstand/kickstandStore';
 import type * as THREE from 'three';
 import type { Vec3 } from '../types';
-import { seatingRing, SEAT_MIN_HITS } from './contactSeating';
+import { seatingRing, isTipSeated } from './contactSeating';
 import { clampConeAxis } from './attachmentLimits';
 import type { ContactCone } from '../SupportPrimitives/ContactCone/types';
 import { getSnapshot } from '../state';
@@ -589,8 +589,9 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         const dia = cone.profile?.contactDiameterMm ?? 0.4;
         mesh.updateMatrixWorld();
         // Same disk plane as placement: the clamped surface normal.
-        const ring = seatingRing(cone.pos, clampConeAxis(cone.surfaceNormal ?? cone.normal), dia / 2 + 0.05, mesh);
-        if (ring.hits < SEAT_MIN_HITS) {
+        const n = clampConeAxis(cone.surfaceNormal ?? cone.normal);
+        if (!isTipSeated(cone.pos, n, dia, mesh)) {
+            const ring = seatingRing(cone.pos, n, dia / 2 + 0.05, mesh);
             const e = g(modelId);
             e.unseatedTips = (e.unseatedTips ?? 0) + 1;
             sample(modelId, kind, 'unseated-tip', cone.pos, ring.hits);

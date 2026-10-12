@@ -76,6 +76,8 @@ export interface AutoPlaceAnalytics {
     sizingDebug?: SizingDebugInfo;
     /** Post-placement leaf fanning: outcome counters (diagnostics). */
     fanning?: Record<string, number>;
+    /** Contact seating outcomes: flat face, edge/corner bisector, slid inward, unseated. */
+    seating?: Record<string, number>;
     /** Per-candidate reject details + uncovered island info (diagnostics). */
     debug?: {
         rejects: Array<{ id: string; source: string; err: string; z: number; nz: number }>;
