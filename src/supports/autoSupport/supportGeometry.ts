@@ -1,3 +1,4 @@
+import { getOrCreateSDFCache } from '../PlacementLogic/Pathfinding/SmartPlacementV2';
 import { getTrunkSegmentEndpoints } from '../SupportPrimitives/Knot/knotUtils';
 import { getKickstandSnapshot } from '../SupportTypes/Kickstand/kickstandStore';
 import type * as THREE from 'three';
@@ -197,6 +198,8 @@ export interface SupportAuditOffender {
     otherHit?: { modelId: string; capsule: number; of: number; part: SupportCapsule['part']; at: Vec3 };
     /** First own-model hit: which capsule (index/part/length/radius) and where it enters. */
     ownHit?: { capsule: number; of: number; part: SupportCapsule['part']; lengthMm: number; r: number; t: number; at: Vec3 };
+    /** The capsules that were tested, bottom to top: [part, a, b] (debugging). */
+    path?: Array<[SupportCapsule['part'], Vec3, Vec3]>;
 }
 
 export interface SupportAuditModelStats {
@@ -228,6 +231,8 @@ export interface SupportAuditResult {
     rootBoundsXY: Record<string, { minX: number; maxX: number; minY: number; maxY: number }>;
     /** Weak-geometry findings per model (see SupportGeometryIssues). */
     geometry: Record<string, SupportGeometryIssues>;
+    /** The support currently selected in the app, traced with exact distances to its part. */
+    selected?: SelectedSupportTrace | null;
     offenders: SupportAuditOffender[];
 }
 
@@ -245,14 +250,65 @@ export interface SupportGeometryIssues {
     conelessTrunks: number;
     /** Auto-bracing kickstands (plate → elbow → host knot on a shaft). */
     kickstands?: number;
+    /** Trunks whose printed path goes inside their own part (exact distance < 0). */
+    trunksInsidePart?: number;
     /** Contact cones whose axis lies more than 50° off straight down. */
     tiltedCones?: number;
     samples: Array<{ kind: string; issue: GeometryIssue; at: Vec3; detail: number }>;
 }
 
-type GeometryIssue = 'wall' | 'steep' | 'coneless' | 'kickstand' | 'tilted-cone';
+type GeometryIssue = 'wall' | 'steep' | 'coneless' | 'kickstand' | 'tilted-cone' | 'inside-part';
 /** Contact cone axis more than this off straight down (deg). */
 const TILTED_CONE_DEG = 50;
+
+/** Walk a printed polyline and return the smallest exact signed distance to
+ *  the part (negative = inside), ignoring the last `tipAllowance` mm. */
+function minDistanceAlong(path: Vec3[], mesh: THREE.Mesh, tipAllowance: number, stepMm = 0.25): { d: number; at: Vec3 } {
+    const sdf = getOrCreateSDFCache(mesh);
+    sdf.refreshMatrix();
+    let total = 0;
+    for (let i = 1; i < path.length; i++) total += len(sub(path[i], path[i - 1]));
+    let walked = 0, minD = Infinity, minAt = path[0];
+    for (let i = 1; i < path.length; i++) {
+        const a = path[i - 1], b = path[i];
+        const L = len(sub(b, a));
+        const steps = Math.max(1, Math.ceil(L / stepMm));
+        for (let k = 0; k <= steps; k++) {
+            if (walked + (L * k) / steps > total - tipAllowance) break;
+            const p = lerp(a, b, k / steps);
+            const d = sdf.exactSignedDistanceAt(p.x, p.y, p.z);
+            if (d < minD) { minD = d; minAt = p; }
+        }
+        walked += L;
+    }
+    return { d: minD, at: minAt };
+}
+
+function trunkPath(snap: ReturnType<typeof getSnapshot>, t: ReturnType<typeof getSnapshot>['trunks'][string]): Vec3[] {
+    const path: Vec3[] = [];
+    const root = snap.roots[t.rootId];
+    t.segments.forEach((sg, i) => {
+        const ep = getTrunkSegmentEndpoints(t, sg, i, root);
+        if (!ep) return;
+        if (path.length === 0) path.push(ep.start);
+        path.push(ep.end);
+    });
+    if (t.contactCone) path.push(t.contactCone.pos);
+    return path;
+}
+
+export interface SelectedSupportTrace {
+    kind: string;
+    id: string;
+    modelId: string;
+    tip?: Vec3;
+    /** Bottom → top polyline as printed (root top, joints, socket, tip). */
+    path: Vec3[];
+    /** Smallest exact signed distance to the part along the path, excluding the
+     *  last 1.2 mm before the tip (negative = inside the part). */
+    minDistanceMm: number;
+    minAt: Vec3;
+}
 
 const WALL_NORMAL_Z = 0.34;
 const STEEP_SHAFT_DEG = 45;
@@ -359,7 +415,9 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         if (tipOnUpFacing) { stats.tipsOnUpFacing++; totals.tipsOnUpFacing++; }
         if (crossHosted) { stats.crossModelHosted++; totals.crossModelHosted++; }
         if ((throughOwnModel || throughOtherModels.length || tipOnUpFacing || crossHosted) && offenders.length < maxOffenders) {
-            offenders.push({ kind, id, modelId, throughOwnModel, throughOtherModels, tipOnUpFacing, tip: tipCones[0]?.pos, ownHit, otherHit });
+            const rr = (v: Vec3) => ({ x: Math.round(v.x * 100) / 100, y: Math.round(v.y * 100) / 100, z: Math.round(v.z * 100) / 100 });
+            offenders.push({ kind, id, modelId, throughOwnModel, throughOtherModels, tipOnUpFacing, tip: tipCones[0]?.pos, ownHit, otherHit,
+                path: caps.map((c) => [c.part, rr(c.a), rr(c.b)] as [SupportCapsule['part'], Vec3, Vec3]) });
         }
     };
 
@@ -447,6 +505,65 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         checkShafts('anchor', a.modelId, shaftEntityCapsules(a.segments, a.contactCone, a.joint?.pos));
     }
 
+    // Selected support: trace it the way the slicer prints it.
+    let selected: SelectedSupportTrace | null = null;
+    const selId = snap.selectedId;
+    if (selId) {
+        const ownerTrunk = snap.trunks[selId]
+            ?? Object.values(snap.trunks).find((t) => t.segments.some((sg) => sg.id === selId || sg.topJoint?.id === selId || sg.bottomJoint?.id === selId));
+        let kind = 'trunk';
+        let modelId = '';
+        let path: Vec3[] = [];
+        let tip: Vec3 | undefined;
+        if (ownerTrunk) {
+            modelId = ownerTrunk.modelId;
+            const root = snap.roots[ownerTrunk.rootId];
+            ownerTrunk.segments.forEach((sg, i) => {
+                const ep = getTrunkSegmentEndpoints(ownerTrunk, sg, i, root);
+                if (!ep) return;
+                if (path.length === 0) path.push(ep.start);
+                path.push(ep.end);
+            });
+            if (ownerTrunk.contactCone) { tip = ownerTrunk.contactCone.pos; path.push(tip); }
+        } else if (snap.leaves[selId]) {
+            const l = snap.leaves[selId]; kind = 'leaf'; modelId = l.modelId;
+            const knot = snap.knots[l.parentKnotId];
+            tip = l.contactCone.pos;
+            path = knot ? [knot.pos, tip] : [tip];
+        } else if (snap.branches[selId]) {
+            const b = snap.branches[selId]; kind = 'branch'; modelId = b.modelId;
+            const knot = snap.knots[b.parentKnotId];
+            path = [...(knot ? [knot.pos] : []), ...b.segments.map((sg) => sg.topJoint?.pos).filter(Boolean) as Vec3[]];
+            if (b.contactCone) { tip = b.contactCone.pos; path.push(tip); }
+        } else if (snap.anchors[selId]) {
+            const a = snap.anchors[selId]; kind = 'anchor'; modelId = a.modelId;
+            path = [a.joint.pos, ...a.segments.map((sg) => sg.topJoint?.pos).filter(Boolean) as Vec3[], a.contactCone.pos];
+            tip = a.contactCone.pos;
+        }
+        const mesh = modelId ? getModelMesh(modelId) : null;
+        if (mesh && path.length >= 2) {
+            const { d: minD, at: minAt } = minDistanceAlong(path, mesh, OWN_CONE_TIP_ALLOWANCE_MM, 0.2);
+            const rr = (v: Vec3) => ({ x: r2(v.x), y: r2(v.y), z: r2(v.z) });
+            selected = { kind, id: selId, modelId, tip: tip ? rr(tip) : undefined, path: path.map(rr), minDistanceMm: r2(minD), minAt: rr(minAt) };
+        } else {
+            selected = { kind: snap.selectedCategory ?? 'unknown', id: selId, modelId, path: [], minDistanceMm: NaN, minAt: { x: 0, y: 0, z: 0 } };
+        }
+    }
+
+    // Exact check: trunks whose printed path enters their own part (beyond the
+    // contact tip). The capsule/SDF-grid test above is approximate.
+    for (const t of Object.values(snap.trunks)) {
+        const mesh = getModelMesh(t.modelId);
+        const path = trunkPath(snap, t);
+        if (!mesh || path.length < 2) continue;
+        const { d, at } = minDistanceAlong(path, mesh, OWN_CONE_TIP_ALLOWANCE_MM);
+        if (d < 0) {
+            const e = g(t.modelId);
+            e.trunksInsidePart = (e.trunksInsidePart ?? 0) + 1;
+            sample(t.modelId, 'trunk', 'inside-part', at, d);
+        }
+    }
+
     const ks = getKickstandSnapshot();
     for (const k of Object.values(ks.kickstands)) {
         const e = g(k.modelId);
@@ -455,5 +572,5 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         if (host) sample(k.modelId, 'kickstand', 'kickstand', host, 0);
     }
 
-    return { totals, perModel, trunks: trunkStats(), rootBoundsXY, geometry, offenders };
+    return { totals, perModel, trunks: trunkStats(), rootBoundsXY, geometry, selected, offenders };
 }

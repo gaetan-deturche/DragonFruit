@@ -1,3 +1,4 @@
+import { getTrunkSegmentEndpoints } from '../SupportPrimitives/Knot/knotUtils';
 import * as THREE from 'three';
 import type { CandidatePoint, AutoPlaceResult, AutoPlaceAnalytics, RejectReason } from './types';
 
@@ -22,7 +23,7 @@ import { pushHistory } from '@/history/historyStore';
 import { getModelMesh } from './meshStore';
 import { isRootWithinPlate } from '../plateBounds';
 import { AUTO_ATTACH_MAX_ANGLE_DEG, AUTO_LEAF_MAX_SPAN_MM, MAX_CONE_TILT_DEG, angleFromVerticalDeg, clampConeAxis } from './attachmentLimits';
-import type { Roots } from '../types';
+import type { Roots, Trunk } from '../types';
 import { generateOverhangCandidates, generateLowestPointCandidates } from './overhangSampling';
 import {
     collidesWithOtherModels,
@@ -394,12 +395,29 @@ function findMergeHost(
  * of holding it: treat it like a blocked trunk so the fallbacks get a chance.
  */
 const CONE_TILT_REJECT_DEG = MAX_CONE_TILT_DEG + 10;
-function trunkConeTooTilted(build: { trunk?: { contactCone?: { normal: { x: number; y: number; z: number } } } }): boolean {
+/** Max angle from vertical of any shaft segment of an auto trunk (deg). The
+ *  router can kink a trunk into a long diagonal to reach around the part: a
+ *  leaning segment flexes at every peel like a cantilever. */
+const MAX_TRUNK_SEGMENT_DEG = 45;
+
+function trunkConeTooTilted(build: { trunk?: Trunk; root?: Roots }): boolean {
     const n = build.trunk?.contactCone?.normal;
-    if (!n) return false;
-    const len = Math.hypot(n.x, n.y, n.z) || 1;
-    const tilt = (Math.acos(Math.max(-1, Math.min(1, -n.z / len))) * 180) / Math.PI;
-    return tilt > CONE_TILT_REJECT_DEG;
+    if (n) {
+        const len = Math.hypot(n.x, n.y, n.z) || 1;
+        const tilt = (Math.acos(Math.max(-1, Math.min(1, -n.z / len))) * 180) / Math.PI;
+        if (tilt > CONE_TILT_REJECT_DEG) return true;
+    }
+    const trunk = build.trunk;
+    if (!trunk) return false;
+    for (let i = 0; i < trunk.segments.length; i++) {
+        const ep = getTrunkSegmentEndpoints(trunk, trunk.segments[i], i, build.root);
+        if (!ep) continue;
+        const dx = ep.end.x - ep.start.x, dy = ep.end.y - ep.start.y, dz = ep.end.z - ep.start.z;
+        const L = Math.hypot(dx, dy, dz);
+        if (L < 0.5) continue;
+        if ((Math.acos(Math.min(1, Math.abs(dz) / L)) * 180) / Math.PI > MAX_TRUNK_SEGMENT_DEG) return true;
+    }
+    return false;
 }
 
 function placeOneCandidate(

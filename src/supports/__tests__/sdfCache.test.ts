@@ -91,3 +91,25 @@ test('refreshMatrix invalidates cached distances after a move', () => {
     const after = sdf.distanceAt(0, 0, 8);
     assert.ok(after <= 0.5, `expected near-zero/inside after move, got ${after}`);
 });
+
+test('sign stays correct when the nearest point is an edge or vertex (FRONT plate bug)', () => {
+    initializeBVH();
+    // A tilted box: points diagonally off its corners/edges have a nearest
+    // point on an edge or vertex, where the nearest-face normal can point away.
+    const geometry = new THREE.BoxGeometry(10, 6, 2);
+    accelerateGeometry(geometry);
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    mesh.rotation.set(-0.9, -0.7, 0);
+    mesh.position.set(44, -37, 36);
+    mesh.updateMatrixWorld(true);
+    const sdf = new SDFCache(mesh, { cellSize: 0.5 });
+
+    const box = new THREE.Box3().setFromObject(mesh);
+    // Far below and beside the part: always outside.
+    for (const [x, y, z] of [[box.min.x, box.min.y, box.min.z - 15], [box.max.x + 3, box.min.y - 3, box.min.z - 2], [44, -37, box.min.z - 20]]) {
+        const d = sdf.exactSignedDistanceAt(x, y, z);
+        assert.ok(d > 0, `point (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}) is outside but read ${d.toFixed(2)}`);
+    }
+    // The centre is inside.
+    assert.ok(sdf.exactSignedDistanceAt(44, -37, 36) < 0, 'centre must read inside');
+});

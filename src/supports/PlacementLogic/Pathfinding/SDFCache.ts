@@ -46,7 +46,16 @@ interface MeshBVHLike {
         minThreshold?: number,
         maxThreshold?: number,
     ): MeshBVHClosestPointTarget | null;
+    raycast?(ray: THREE.Ray, materialOrSide?: THREE.Side): Array<unknown>;
 }
+
+/** Skewed ray directions for the parity test (never axis-aligned: avoids
+ *  grazing the axis-aligned edges and faces common in hard-surface models). */
+const PARITY_DIRS = [
+    new THREE.Vector3(0.2734, 0.4381, 0.8564).normalize(),
+    new THREE.Vector3(-0.6157, 0.3122, -0.7234).normalize(),
+    new THREE.Vector3(0.5412, -0.7718, 0.3339).normalize(),
+];
 
 // ---------- Helpers ----------
 
@@ -656,7 +665,30 @@ export class SDFCache {
         const dz = this._localPoint.z - rp.z;
 
         // Negative dot → query point faces into the mesh interior
-        return (dx * fn.x + dy * fn.y + dz * fn.z) < 0;
+        const byFaceNormal = (dx * fn.x + dy * fn.y + dz * fn.z) < 0;
+
+        // The nearest-face normal is only trustworthy when the closest point is
+        // inside that face. When it lies on an edge or vertex - most of the time
+        // on detailed models, and always for points well away from the part - the
+        // chosen face can point the wrong way and flip the sign: points 20 mm
+        // below a part read as "inside" (false collisions everywhere) and points
+        // inside it as "outside" (supports printed through the part). Confirm
+        // with ray parity, majority of three skewed rays when they disagree.
+        if (!this.bvh.raycast) return byFaceNormal;
+        const first = this._parityInside(PARITY_DIRS[0]);
+        if (first === byFaceNormal) return first;
+        const votes = (first ? 1 : 0) + (this._parityInside(PARITY_DIRS[1]) ? 1 : 0) + (this._parityInside(PARITY_DIRS[2]) ? 1 : 0);
+        return votes >= 2;
+    }
+
+    private readonly _parityRay = new THREE.Ray();
+
+    /** Odd number of surface crossings along `dir` from the query point → inside. */
+    private _parityInside(dir: THREE.Vector3): boolean {
+        this._parityRay.origin.copy(this._localPoint);
+        this._parityRay.direction.copy(dir);
+        const hits = this.bvh.raycast!(this._parityRay, THREE.DoubleSide);
+        return (hits.length % 2) === 1;
     }
 
     /**
