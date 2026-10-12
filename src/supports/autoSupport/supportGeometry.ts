@@ -1,3 +1,4 @@
+import { getKickstandSnapshot } from '../SupportTypes/Kickstand/kickstandStore';
 import type * as THREE from 'three';
 import type { Vec3 } from '../types';
 import type { ContactCone } from '../SupportPrimitives/ContactCone/types';
@@ -52,8 +53,28 @@ function coneCapsule(cone: ContactCone, from?: Vec3): SupportCapsule {
     return { a: from ?? coneSocket(cone), b: cone.pos, r, part: 'cone' };
 }
 
+/** Sub-capsules per curved (Bezier) segment: the chord alone misses the bulge. */
+const BEZIER_SUBDIVISIONS = 8;
+
+function cubic(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: number): Vec3 {
+    const u = 1 - t;
+    const a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+    return {
+        x: a * p0.x + b * p1.x + c * p2.x + d * p3.x,
+        y: a * p0.y + b * p1.y + c * p2.y + d * p3.y,
+        z: a * p0.z + b * p1.z + c * p2.z + d * p3.z,
+    };
+}
+
 function segmentCapsules(
-    segments: Array<{ diameter?: number; bottomJoint?: { pos: Vec3 } | null; topJoint?: { pos: Vec3 } | null }>,
+    segments: Array<{
+        diameter?: number;
+        type?: string;
+        controlPoint1?: Vec3;
+        controlPoint2?: Vec3;
+        bottomJoint?: { pos: Vec3 } | null;
+        topJoint?: { pos: Vec3 } | null;
+    }>,
     firstStart?: Vec3,
 ): SupportCapsule[] {
     const out: SupportCapsule[] = [];
@@ -61,7 +82,19 @@ function segmentCapsules(
     for (const seg of segments) {
         const a = seg.bottomJoint?.pos ?? prevTop;
         const b = seg.topJoint?.pos;
-        if (a && b) out.push({ a, b, r: ((seg.diameter ?? 1) / 2) * RADIUS_TOLERANCE, part: 'shaft' });
+        const r = ((seg.diameter ?? 1) / 2) * RADIUS_TOLERANCE;
+        if (a && b) {
+            if (seg.type === 'bezier' && seg.controlPoint1 && seg.controlPoint2) {
+                let prev = a;
+                for (let i = 1; i <= BEZIER_SUBDIVISIONS; i++) {
+                    const p = cubic(a, seg.controlPoint1, seg.controlPoint2, b, i / BEZIER_SUBDIVISIONS);
+                    out.push({ a: prev, b: p, r, part: 'shaft' });
+                    prev = p;
+                }
+            } else {
+                out.push({ a, b, r, part: 'shaft' });
+            }
+        }
         if (b) prevTop = b;
     }
     return out;
@@ -192,8 +225,31 @@ export interface SupportAuditResult {
     trunks: Record<string, TrunkStats>;
     /** XY extent of each model's support roots (base pads, pos ± diameter/2), mm. Rafts add a margin on top. */
     rootBoundsXY: Record<string, { minX: number; maxX: number; minY: number; maxY: number }>;
+    /** Weak-geometry findings per model (see SupportGeometryIssues). */
+    geometry: Record<string, SupportGeometryIssues>;
     offenders: SupportAuditOffender[];
 }
+
+/**
+ * Supports that hold badly even when they do not collide:
+ * - wallContacts: the tip sits on a near-vertical face (|normal.z| < 0.34,
+ *   i.e. steeper than 70°): it pushes on a wall instead of carrying an underside.
+ * - steepShafts: a trunk/branch/anchor shaft segment more than 45° off vertical
+ *   (e.g. a horizontal elbow): it carries the peel in bending.
+ * - conelessTrunks: a trunk with no contact cone (ends on a bare joint).
+ */
+export interface SupportGeometryIssues {
+    wallContacts: number;
+    steepShafts: number;
+    conelessTrunks: number;
+    /** Auto-bracing kickstands (plate → elbow → host knot on a shaft). */
+    kickstands?: number;
+    samples: Array<{ kind: string; issue: 'wall' | 'steep' | 'coneless' | 'kickstand'; at: Vec3; detail: number }>;
+}
+
+const WALL_NORMAL_Z = 0.34;
+const STEEP_SHAFT_DEG = 45;
+const MAX_GEOMETRY_SAMPLES = 25;
 
 function pct(sorted: number[], q: number): number {
     if (!sorted.length) return 0;
@@ -330,5 +386,53 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         b.minY = Math.min(b.minY, r2(y - r)); b.maxY = Math.max(b.maxY, r2(y + r));
     }
 
-    return { totals, perModel, trunks: trunkStats(), rootBoundsXY, offenders };
+    const geometry: Record<string, SupportGeometryIssues> = {};
+    const g = (modelId: string) => (geometry[modelId] ??= { wallContacts: 0, steepShafts: 0, conelessTrunks: 0, samples: [] });
+    const sample = (modelId: string, kind: string, issue: 'wall' | 'steep' | 'coneless' | 'kickstand', at: Vec3, detail: number) => {
+        const e = g(modelId);
+        if (e.samples.length < MAX_GEOMETRY_SAMPLES) e.samples.push({ kind, issue, at: { x: r2(at.x), y: r2(at.y), z: r2(at.z) }, detail: r2(detail) });
+    };
+    const checkCone = (kind: string, modelId: string, cone: ContactCone | undefined) => {
+        if (!cone) return;
+        const nz = (cone.surfaceNormal ?? cone.normal).z;
+        if (Math.abs(nz) < WALL_NORMAL_Z) { g(modelId).wallContacts++; sample(modelId, kind, 'wall', cone.pos, nz); }
+    };
+    const checkShafts = (kind: string, modelId: string, caps: SupportCapsule[]) => {
+        for (const c of caps) {
+            if (c.part !== 'shaft') continue;
+            const dx = c.b.x - c.a.x, dy = c.b.y - c.a.y, dz = c.b.z - c.a.z;
+            const len = Math.hypot(dx, dy, dz);
+            if (len < 0.15) continue;
+            const deg = (Math.acos(Math.min(1, Math.abs(dz) / len)) * 180) / Math.PI;
+            if (deg > STEEP_SHAFT_DEG) { g(modelId).steepShafts++; sample(modelId, kind, 'steep', c.b, deg); break; }
+        }
+    };
+    for (const t of Object.values(snap.trunks)) {
+        if (!t.contactCone) {
+            g(t.modelId).conelessTrunks++;
+            const top = t.segments[t.segments.length - 1]?.topJoint?.pos;
+            if (top) sample(t.modelId, 'trunk', 'coneless', top, 0);
+        }
+        checkCone('trunk', t.modelId, t.contactCone);
+        checkShafts('trunk', t.modelId, shaftEntityCapsules(t.segments, t.contactCone));
+    }
+    for (const b of Object.values(snap.branches)) {
+        checkCone('branch', b.modelId, b.contactCone);
+        checkShafts('branch', b.modelId, shaftEntityCapsules(b.segments, b.contactCone, snap.knots[b.parentKnotId]?.pos));
+    }
+    for (const l of Object.values(snap.leaves)) checkCone('leaf', l.modelId, l.contactCone);
+    for (const a of Object.values(snap.anchors)) {
+        checkCone('anchor', a.modelId, a.contactCone);
+        checkShafts('anchor', a.modelId, shaftEntityCapsules(a.segments, a.contactCone, a.joint?.pos));
+    }
+
+    const ks = getKickstandSnapshot();
+    for (const k of Object.values(ks.kickstands)) {
+        const e = g(k.modelId);
+        e.kickstands = (e.kickstands ?? 0) + 1;
+        const host = ks.knots[k.hostKnotId]?.pos;
+        if (host) sample(k.modelId, 'kickstand', 'kickstand', host, 0);
+    }
+
+    return { totals, perModel, trunks: trunkStats(), rootBoundsXY, geometry, offenders };
 }
