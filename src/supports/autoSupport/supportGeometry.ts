@@ -129,7 +129,7 @@ export function stickCapsules(
     return [...segmentCapsules(segments), coneCapsule(coneA), coneCapsule(coneB)];
 }
 
-function capsuleHitsMesh(c: SupportCapsule, mesh: THREE.Mesh, isOwnModel: boolean): boolean {
+export function capsuleHitsMesh(c: SupportCapsule, mesh: THREE.Mesh, isOwnModel: boolean): boolean {
     const a = c.a;
     let b = c.b;
     if (isOwnModel && c.part === 'cone') {

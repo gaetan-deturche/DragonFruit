@@ -28,6 +28,7 @@ import { generateOverhangCandidates, generateLowestPointCandidates } from './ove
 import {
     collidesWithOtherModels,
     leafCapsules,
+    capsuleHitsMesh,
     shaftEntityCapsules,
     stickCapsules,
     type SupportCapsule,
@@ -266,7 +267,22 @@ function leafConeCollides(
         const hits = _leafRaycaster.intersectObject(mesh, false);
         if (hits.length > 0 && hits[0].distance < totalDist - 0.5) return true;
     }
-    return false;
+    // The rays only sample one plane of the cone: also test its full volume
+    // (a cone skimming an edge sideways slipped between them).
+    return capsuleHitsMesh(leafCapsules(knotPos, cone as Parameters<typeof leafCapsules>[1])[0], mesh, true);
+}
+
+/**
+ * Whether the contact cone of a built support runs through its own model.
+ * Shafts are checked against the SDF while routing, but the cone is not: on a
+ * lip or next to a step, a cone tilted along the surface normal cut through the
+ * part for a millimetre or two before reaching its tip.
+ */
+function coneCutsModel(caps: SupportCapsule[], mesh?: THREE.Mesh): boolean {
+    if (!mesh) return false;
+    const c = caps.find((k) => k.part === 'cone');
+    if (!c) return false;
+    return capsuleHitsMesh(c, mesh, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -636,16 +652,28 @@ function placeOneCandidate(
     // Dynamic physics-based sizing using model context + user settings.
     let overrides = sizeParameters(candidate, modelCtx, supportSettings, totalArea);
 
-    let trunkResult = buildTrunkData({
-        tipPos,
-        tipNormal,
-        modelId: candidate.modelId,
-        mesh,
-        overrides,
-        isPreview: false,
-    });
-    if (!trunkResult.error && trunkConeTooTilted(trunkResult)) {
-        trunkResult = { ...trunkResult, error: 'COLLISION_WITH_MODEL' };
+    // Cone axis: the clamped surface normal first; when that cone cuts the
+    // part, straighten it toward vertical (a vertical cone clears a lip).
+    const coneAxes = [tipNormal, clampConeAxis(tipNormal, 20), { x: 0, y: 0, z: -1 }];
+    let trunkResult!: ReturnType<typeof buildTrunkData>;
+    for (const axis of coneAxes) {
+        tipNormal = axis;
+        trunkResult = buildTrunkData({
+            tipPos,
+            tipNormal,
+            modelId: candidate.modelId,
+            mesh,
+            overrides,
+            isPreview: false,
+        });
+        if (!trunkResult.error && trunkConeTooTilted(trunkResult)) {
+            trunkResult = { ...trunkResult, error: 'COLLISION_WITH_MODEL' };
+        }
+        if (!trunkResult.error && coneCutsModel(trunkCapsulesOf(trunkResult), mesh)) {
+            trunkResult = { ...trunkResult, error: 'COLLISION_WITH_MODEL' };
+            continue;
+        }
+        break;
     }
     // The model-level tip minimum widens the contact disk; in a tight spot
     // (a slot, a lip next to a wall) that wider disk can clip the model and
@@ -657,7 +685,7 @@ function placeOneCandidate(
             const retry = buildTrunkData({
                 tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides: islandSized, isPreview: false,
             });
-            if (!retry.error && !trunkConeTooTilted(retry)) {
+            if (!retry.error && !trunkConeTooTilted(retry) && !coneCutsModel(trunkCapsulesOf(retry), mesh)) {
                 overrides = islandSized;
                 trunkResult = retry;
             }
@@ -705,7 +733,7 @@ function placeOneCandidate(
             const escape = buildEscapeTrunkData({
                 tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides, isPreview: false,
             });
-            if (!escape.error && !trunkConeTooTilted(escape) && !rootOffPlate(escape.root) && !collidesWithOtherModels(trunkCapsulesOf(escape), candidate.modelId)) {
+            if (!escape.error && !trunkConeTooTilted(escape) && !coneCutsModel(trunkCapsulesOf(escape), mesh) && !rootOffPlate(escape.root) && !collidesWithOtherModels(trunkCapsulesOf(escape), candidate.modelId)) {
                 addRoot(escape.root);
                 addTrunk(escape.trunk);
                 console.log(LOG_PREFIX,
@@ -739,6 +767,9 @@ function placeOneCandidate(
             if (trunkConeTooTilted(decision.trunkBuild)) {
                 return { kind: 'reject', rejectedReason: 'trunk_build_error', preset, detail: 'CONE_TOO_TILTED' };
             }
+            if (coneCutsModel(trunkCapsulesOf(decision.trunkBuild), mesh)) {
+                return { kind: 'reject', rejectedReason: 'grid_reject_collision', preset, detail: 'CONE_THROUGH_MODEL' };
+            }
             if (collidesWithOtherModels(trunkCapsulesOf(decision.trunkBuild), candidate.modelId)) return crossReject;
             const trunkId = decision.trunkBuild.trunk.id;
             addRoot(decision.trunkBuild.root);
@@ -765,10 +796,11 @@ function placeOneCandidate(
                     `Grid skip ${candidate.id}: host ${decision.hostTrunkId} at capacity (${cap})`);
                 return { kind: 'reject', rejectedReason: 'grid_reject_other', preset };
             }
-            if (collidesWithOtherModels(
-                shaftEntityCapsules(decision.branch.segments, decision.branch.contactCone, decision.knot.pos),
-                candidate.modelId,
-            )) return crossReject;
+            const branchCaps = shaftEntityCapsules(decision.branch.segments, decision.branch.contactCone, decision.knot.pos);
+            if (coneCutsModel(branchCaps, mesh)) {
+                return { kind: 'reject', rejectedReason: 'grid_reject_collision', preset, detail: 'CONE_THROUGH_MODEL' };
+            }
+            if (collidesWithOtherModels(branchCaps, candidate.modelId)) return crossReject;
             addKnot(decision.knot);
             addBranch(decision.branch);
             console.log(LOG_PREFIX,
@@ -783,6 +815,9 @@ function placeOneCandidate(
                 console.log(LOG_PREFIX,
                     `Grid skip ${candidate.id}: host ${decision.hostTrunkId} at capacity (${cap})`);
                 return { kind: 'reject', rejectedReason: 'grid_reject_other', preset };
+            }
+            if (coneCutsModel(leafCapsules(decision.knot.pos, decision.leaf.contactCone), mesh)) {
+                return { kind: 'reject', rejectedReason: 'grid_reject_collision', preset, detail: 'CONE_THROUGH_MODEL' };
             }
             if (collidesWithOtherModels(leafCapsules(decision.knot.pos, decision.leaf.contactCone), candidate.modelId)) {
                 return crossReject;
@@ -799,6 +834,9 @@ function placeOneCandidate(
             if (rootOffPlate(decision.trunkBuild.root)) return offPlateReject;
             if (trunkConeTooTilted(decision.trunkBuild)) {
                 return { kind: 'reject', rejectedReason: 'trunk_build_error', preset, detail: 'CONE_TOO_TILTED' };
+            }
+            if (coneCutsModel(trunkCapsulesOf(decision.trunkBuild), mesh)) {
+                return { kind: 'reject', rejectedReason: 'grid_reject_collision', preset, detail: 'CONE_THROUGH_MODEL' };
             }
             if (collidesWithOtherModels(trunkCapsulesOf(decision.trunkBuild), candidate.modelId)) return crossReject;
             // The old trunk gets removed by the caller (or we accept overwrite).
