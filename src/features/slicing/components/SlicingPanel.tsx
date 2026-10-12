@@ -56,6 +56,7 @@ import {
   type SavedCurve,
 } from './LutCurveEditor';
 import { useKeyPressed } from '@/hotkeys/hotkeyStore';
+import { estimatePrintTimeSec } from '@/features/profiles/printTimeEstimate';
 
 export type SliceIntent = 'file' | 'upload' | 'print' | 'preview' | 'uvtools';
 
@@ -1327,25 +1328,9 @@ export function SlicingPanel({
   const estimatedPrintTimeLabel = useMemo(() => {
     if (!effectiveMaterialProfile || estimatedLayerCount <= 0) return '—';
 
-    const totalLayers = estimatedLayerCount;
-    const bottomLayers = Math.max(0, Math.min(totalLayers, Math.round(effectiveMaterialProfile.bottomLayerCount)));
-    const normalLayers = Math.max(0, totalLayers - bottomLayers);
-
-    const liftSec = effectiveMaterialProfile.liftSpeedMmMin > 0
-      ? (effectiveMaterialProfile.liftDistanceMm / effectiveMaterialProfile.liftSpeedMmMin) * 60
-      : 0;
-    const retractSec = effectiveMaterialProfile.retractSpeedMmMin > 0
-      ? (effectiveMaterialProfile.liftDistanceMm / effectiveMaterialProfile.retractSpeedMmMin) * 60
-      : 0;
-    const travelSecPerLayer = Math.max(0, liftSec + retractSec);
-
-    const totalSec = (
-      bottomLayers * (effectiveMaterialProfile.bottomExposureSec + travelSecPerLayer)
-      + normalLayers * (effectiveMaterialProfile.normalExposureSec + travelSecPerLayer)
-    );
-
+    const totalSec = estimatePrintTimeSec(effectiveMaterialProfile, activePrinterProfile, estimatedLayerCount);
     return formatClockFromSeconds(totalSec);
-  }, [effectiveMaterialProfile, estimatedLayerCount]);
+  }, [activePrinterProfile, effectiveMaterialProfile, estimatedLayerCount]);
 
   // Shared pixel pitch calculation used by autoAaConfig.
   // Prefers the explicit pixelSize field (µm, stored directly from the manufacturer

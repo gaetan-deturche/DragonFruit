@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
+import { estimatePrintTimeSec } from '@/features/profiles/printTimeEstimate';
 import { msg } from '@lingui/core/macro';
 import { useLingui } from '@lingui/react';
 import type { MessageDescriptor } from '@lingui/core';
@@ -3171,25 +3172,9 @@ export default function Home() {
   const estimatedPrintTimeLabel = React.useMemo(() => {
     if (!activeMaterialProfile || printingPreviewTotalLayers <= 0) return '—';
 
-    const totalLayers = printingPreviewTotalLayers;
-    const bottomLayers = Math.max(0, Math.min(totalLayers, Math.round(activeMaterialProfile.bottomLayerCount)));
-    const normalLayers = Math.max(0, totalLayers - bottomLayers);
-
-    const liftSec = activeMaterialProfile.liftSpeedMmMin > 0
-      ? (activeMaterialProfile.liftDistanceMm / activeMaterialProfile.liftSpeedMmMin) * 60
-      : 0;
-    const retractSec = activeMaterialProfile.retractSpeedMmMin > 0
-      ? (activeMaterialProfile.liftDistanceMm / activeMaterialProfile.retractSpeedMmMin) * 60
-      : 0;
-    const travelSecPerLayer = Math.max(0, liftSec + retractSec);
-
-    const totalSec = (
-      bottomLayers * (activeMaterialProfile.bottomExposureSec + travelSecPerLayer)
-      + normalLayers * (activeMaterialProfile.normalExposureSec + travelSecPerLayer)
-    );
-
+    const totalSec = estimatePrintTimeSec(activeMaterialProfile, activePrinterProfile, printingPreviewTotalLayers);
     return formatApproxPrintTimeLabel(_, totalSec);
-  }, [_, activeMaterialProfile, printingPreviewTotalLayers]);
+  }, [_, activeMaterialProfile, activePrinterProfile, printingPreviewTotalLayers]);
 
   const canDownloadPrintArtifact = Boolean(printingArtifact);
   const activeNetworkUiAdapter = React.useMemo(
