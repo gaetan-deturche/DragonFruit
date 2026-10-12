@@ -594,9 +594,9 @@ function placeOneCandidate(
     }
 
     // Dynamic physics-based sizing using model context + user settings.
-    const overrides = sizeParameters(candidate, modelCtx, supportSettings, totalArea);
+    let overrides = sizeParameters(candidate, modelCtx, supportSettings, totalArea);
 
-    const trunkResult = buildTrunkData({
+    let trunkResult = buildTrunkData({
         tipPos,
         tipNormal,
         modelId: candidate.modelId,
@@ -604,6 +604,22 @@ function placeOneCandidate(
         overrides,
         isPreview: false,
     });
+    // The model-level tip minimum widens the contact disk; in a tight spot
+    // (a slot, a lip next to a wall) that wider disk can clip the model and
+    // the whole support is lost. A thinner tip beats no support: retry with
+    // the island-sized tip before falling back further.
+    if (trunkResult.error === 'COLLISION_WITH_MODEL' && modelCtx?.minTipContactMm) {
+        const islandSized = sizeParameters(candidate, { ...modelCtx, minTipContactMm: undefined }, supportSettings, totalArea);
+        if ((islandSized.tipContactDiameterMm ?? 0) < (overrides.tipContactDiameterMm ?? 0)) {
+            const retry = buildTrunkData({
+                tipPos, tipNormal, modelId: candidate.modelId, mesh, overrides: islandSized, isPreview: false,
+            });
+            if (!retry.error) {
+                overrides = islandSized;
+                trunkResult = retry;
+            }
+        }
+    }
 
     if (trunkResult.error) {
         // Cavity fallback: if the trunk can't reach the build plate, try

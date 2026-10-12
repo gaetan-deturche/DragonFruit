@@ -71,7 +71,10 @@ export function buildLeafData(input: LeafBuildInput): LeafBuildResult {
         contactDiameterMm: Math.max(settings.tip.contactDiameterMm, input.contactDiameterMm ?? 0),
         bodyDiameterMm: hostDiameterMm,
         lengthMm: settings.tip.lengthMm,
-        penetrationMm: settings.tip.penetrationMm,
+        // Auto-support (contact size given) sinks tips ≥ 0.2 mm, like trunk tips.
+        penetrationMm: input.contactDiameterMm !== undefined
+            ? Math.max(settings.tip.penetrationMm, 0.2)
+            : settings.tip.penetrationMm,
         diskThicknessMm: 0.1,
         maxStandoffMm: 1.5,
         standoffAngleThreshold: Math.PI / 4,

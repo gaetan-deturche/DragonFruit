@@ -37,9 +37,18 @@ const STIFFNESS_BASE_MM = 0.4;
 /** Peel/suction pull per mm² of the layer being separated from the FEP (N/mm²). */
 const LAYER_PEEL_N_PER_MM2 = 0.2;
 /** Safety factor on the total tip contact area vs the worst layer's peel. */
-const TIP_SAFETY_FACTOR = 2;
-/** Upper bound for the model-level tip minimum: bigger contacts scar details. */
-const MAX_REQUIRED_TIP_MM = 0.6;
+const TIP_SAFETY_FACTOR = 3;
+/** Upper bound for the model-level tip minimum: bigger contacts scar details, and
+ *  past ~0.5 mm the tip disk no longer clears sloped surfaces (trunk builds fail). */
+const MAX_REQUIRED_TIP_MM = 0.5;
+/**
+ * Absolute floor for an auto-placed contact. 0.24 mm tips (5 LCD pixels) held
+ * nothing in practice, even on a small 42 mm² part: below ~0.3 mm the cured
+ * neck is too thin and too easily under-cured to carry its share of the peel.
+ */
+const MIN_TIP_CONTACT_MM = 0.3;
+/** Minimum depth a tip is sunk into the part (mm): ~4 layers at 0.05 mm. */
+const MIN_TIP_PENETRATION_MM = 0.2;
 
 /**
  * Every layer of a part is torn off the FEP as a whole, and that pull is carried
@@ -208,8 +217,8 @@ export function sizeParameters(
         // Tied to the load-bearing (strength) section, not the stiffness
         // floor: a tall trunk must not leave a bigger scar on the detail.
         clamp(
-            Math.max(tipContactBase * tipScale, ctx.minTipContactMm ?? 0),
-            strengthDiameterMm * 0.3,
+            Math.max(tipContactBase * tipScale, ctx.minTipContactMm ?? 0, MIN_TIP_CONTACT_MM),
+            Math.max(strengthDiameterMm * 0.3, MIN_TIP_CONTACT_MM),
             // The model-level minimum may exceed 0.6×shaft on thin shafts.
             Math.max(strengthDiameterMm * 0.6, Math.min(ctx.minTipContactMm ?? 0, shaftDiameterMm * 0.8)),
         ),
@@ -220,7 +229,8 @@ export function sizeParameters(
     const tipLengthMm = round(tipLengthBase * clamp(1 + (zHeight - 10) / 100, 0.9, 1.3), 3);
 
     // Penetration: proportional to tip size.
-    const tipPenetrationMm = round(Math.max(tipPenBase, tipContactDiameterMm * 0.25), 3);
+    // A 0.1 mm (2-layer) bite left the junction to a couple of layers of resin.
+    const tipPenetrationMm = round(Math.max(tipPenBase, MIN_TIP_PENETRATION_MM, tipContactDiameterMm * 0.25), 3);
 
     // Root diameter: wider for taller/heavier supports.
     const rootScale = clamp(Math.sqrt(loadN) * 0.6, 0.8, 1.8);
