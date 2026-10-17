@@ -1319,7 +1319,10 @@ export function runAutoPlace(
 
     // ── Post-placement leaf fanning (iterative convergence) ──────────
     const MAX_FANNING_PASSES = 5;
-    const SHAFT_SAMPLES_PER_SEGMENT = 5;
+    // One sample per mm of shaft: a fixed 5 per segment spaced them ~16 mm
+    // apart on tall trunks, so an island right next to a trunk found no point
+    // within the 5 mm leaf reach.
+    const SHAFT_SAMPLE_STEP_MM = 1;
 
     console.log(LOG_PREFIX,
         `Leaf fanning: ${analytics.islandsUncovered} uncovered islands, ${placedTrunks} trunks available. ` +
@@ -1340,14 +1343,19 @@ export function runAutoPlace(
             // Only this model's trunks: hosting a leaf on a NEIGHBOUR's trunk
             // bridged models and ran supports straight through them.
             if (trunk.modelId !== modelId) continue;
-            for (const seg of trunk.segments) {
-                const start = seg.bottomJoint?.pos
-                    ?? { x: 0, y: 0, z: 1.5 };
-                const end = seg.topJoint?.pos;
-                if (!end) continue;
+            const root = snap.roots[trunk.rootId];
+            for (let si = 0; si < trunk.segments.length; si++) {
+                const seg = trunk.segments[si];
+                // Printed endpoints (root top for the first segment): the old
+                // fallback started joint-less segments at the plate origin.
+                const ep = getTrunkSegmentEndpoints(trunk, seg, si, root);
+                if (!ep) continue;
+                const start = ep.start;
+                const end = ep.end;
                 const diameter = seg.diameter ?? 1.0;
-                for (let i = 0; i <= SHAFT_SAMPLES_PER_SEGMENT; i++) {
-                    const t = i / SHAFT_SAMPLES_PER_SEGMENT;
+                const samples = Math.max(1, Math.ceil(Math.hypot(end.x - start.x, end.y - start.y, end.z - start.z) / SHAFT_SAMPLE_STEP_MM));
+                for (let i = 0; i <= samples; i++) {
+                    const t = i / samples;
                     shaftPoints.push({
                         trunkId: tid,
                         pos: {

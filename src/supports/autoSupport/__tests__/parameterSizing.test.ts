@@ -41,25 +41,25 @@ test('candidates above 30 mm still carry model weight', () => {
 });
 
 test('tip minimum covers the largest layer peel', () => {
-    // 516 mm² panel, ~170 contacts: total contact must hold 516·0.2·3 N at 10 MPa.
+    // 516 mm² panel, ~170 contacts: total contact must hold 516·0.2·4 N at 10 MPa.
     const d = requiredTipContactDiameterMm(516, 170);
     const total = 170 * Math.PI * (d / 2) ** 2;
-    assert.ok(total >= (516 * 0.2 * 3) / 10 - 1e-6, `total ${total}`);
-    assert.ok(d > 0.36 && d <= 0.5, `d ${d}`);
-    assert.equal(requiredTipContactDiameterMm(5000, 10), 0.5); // capped
+    assert.ok(total >= (516 * 0.2 * 4) / 10 - 1e-6, `total ${total}`);
+    assert.ok(d > 0.45 && d <= 0.6, `d ${d}`);
+    assert.equal(requiredTipContactDiameterMm(5000, 10), 0.6); // capped
     assert.equal(requiredTipContactDiameterMm(0, 10), 0);
 });
 
 test('model tip minimum raises the contact, within the shaft', () => {
     const base = sizeParameters(candidate(20), ctx).tipContactDiameterMm!;
-    const raised = sizeParameters(candidate(20), { ...ctx, minTipContactMm: 0.5 });
-    assert.ok(base < 0.45, `base ${base}`);
-    assert.ok(raised.tipContactDiameterMm! >= 0.5 - 1e-6, `raised ${raised.tipContactDiameterMm}`);
+    const raised = sizeParameters(candidate(20), { ...ctx, minTipContactMm: 0.55 });
+    assert.ok(base < 0.55, `base ${base}`);
+    assert.ok(raised.tipContactDiameterMm! >= 0.55 - 1e-6, `raised ${raised.tipContactDiameterMm}`);
     assert.ok(raised.tipContactDiameterMm! <= raised.shaftDiameterMm! * 0.8 + 1e-6);
 });
 
-test('no auto tip below 0.35 mm, sunk at least 0.2 mm', () => {
+test('no auto tip below 0.45 mm, sunk at least 0.2 mm', () => {
     const tiny = sizeParameters(candidate(5, 0.01), { ...ctx, minTipContactMm: 0.1 });
-    assert.ok(tiny.tipContactDiameterMm! >= 0.35 - 1e-6, `tip ${tiny.tipContactDiameterMm}`);
+    assert.ok(tiny.tipContactDiameterMm! >= 0.45 - 1e-6, `tip ${tiny.tipContactDiameterMm}`);
     assert.ok(tiny.tipPenetrationMm! >= 0.2 - 1e-6, `pen ${tiny.tipPenetrationMm}`);
 });

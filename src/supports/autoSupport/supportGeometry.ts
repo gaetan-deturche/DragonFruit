@@ -316,6 +316,9 @@ export interface SelectedSupportTrace {
      *  last 1.2 mm before the tip (negative = inside the part). */
     minDistanceMm: number;
     minAt: Vec3;
+    /** Contact cone axis (tip → socket) and the surface normal it was built from. */
+    coneNormal?: Vec3;
+    surfaceNormal?: Vec3;
 }
 
 const WALL_NORMAL_Z = 0.34;
@@ -523,6 +526,7 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         let modelId = '';
         let path: Vec3[] = [];
         let tip: Vec3 | undefined;
+        let selCone: ContactCone | undefined;
         if (ownerTrunk) {
             modelId = ownerTrunk.modelId;
             const root = snap.roots[ownerTrunk.rootId];
@@ -532,11 +536,12 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
                 if (path.length === 0) path.push(ep.start);
                 path.push(ep.end);
             });
-            if (ownerTrunk.contactCone) { tip = ownerTrunk.contactCone.pos; path.push(tip); }
+            if (ownerTrunk.contactCone) { tip = ownerTrunk.contactCone.pos; path.push(tip); selCone = ownerTrunk.contactCone; }
         } else if (snap.leaves[selId]) {
             const l = snap.leaves[selId]; kind = 'leaf'; modelId = l.modelId;
             const knot = snap.knots[l.parentKnotId];
             tip = l.contactCone.pos;
+            selCone = l.contactCone;
             path = knot ? [knot.pos, tip] : [tip];
         } else if (snap.branches[selId]) {
             const b = snap.branches[selId]; kind = 'branch'; modelId = b.modelId;
@@ -552,7 +557,11 @@ export function auditSupports(maxOffenders = 200): SupportAuditResult {
         if (mesh && path.length >= 2) {
             const { d: minD, at: minAt } = minDistanceAlong(path, mesh, OWN_CONE_TIP_ALLOWANCE_MM, 0.2);
             const rr = (v: Vec3) => ({ x: r2(v.x), y: r2(v.y), z: r2(v.z) });
-            selected = { kind, id: selId, modelId, tip: tip ? rr(tip) : undefined, path: path.map(rr), minDistanceMm: r2(minD), minAt: rr(minAt) };
+            selected = {
+                kind, id: selId, modelId, tip: tip ? rr(tip) : undefined, path: path.map(rr), minDistanceMm: r2(minD), minAt: rr(minAt),
+                coneNormal: selCone ? rr(selCone.normal) : undefined,
+                surfaceNormal: selCone?.surfaceNormal ? rr(selCone.surfaceNormal) : undefined,
+            };
         } else {
             selected = { kind: snap.selectedCategory ?? 'unknown', id: selId, modelId, path: [], minDistanceMm: NaN, minAt: { x: 0, y: 0, z: 0 } };
         }

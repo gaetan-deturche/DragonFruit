@@ -37,17 +37,17 @@ const STIFFNESS_BASE_MM = 0.4;
 /** Peel/suction pull per mm² of the layer being separated from the FEP (N/mm²). */
 const LAYER_PEEL_N_PER_MM2 = 0.2;
 /** Safety factor on the total tip contact area vs the worst layer's peel. */
-const TIP_SAFETY_FACTOR = 3;
+const TIP_SAFETY_FACTOR = 4;
 /** Upper bound for the model-level tip minimum: bigger contacts scar details, and
  *  past ~0.5 mm the tip disk no longer clears sloped surfaces (trunk builds fail). */
-const MAX_REQUIRED_TIP_MM = 0.5;
+const MAX_REQUIRED_TIP_MM = 0.6;
 /**
  * Absolute floor for an auto-placed contact. 0.24 mm tips (5 LCD pixels) held
  * nothing in practice, even on a small 42 mm² part. A Chitubox slice of the
  * same parts that printed fine had its thinnest 10 % of junctions at
  * 0.28-0.47 mm and a 0.66-0.69 mm median.
  */
-const MIN_TIP_CONTACT_MM = 0.35;
+const MIN_TIP_CONTACT_MM = 0.45;
 /** Minimum depth a tip is sunk into the part (mm): ~4 layers at 0.05 mm. */
 const MIN_TIP_PENETRATION_MM = 0.2;
 
