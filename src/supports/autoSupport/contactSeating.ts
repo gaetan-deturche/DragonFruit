@@ -16,11 +16,26 @@ const SEAT_TOLERANCE_MM = 0.3;
 const BISECTOR_TOLERANCE_MM = 0.5;
 const SEAT_SHIFT_STEPS_MM = [0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.05, 1.2];
 
+/**
+ * Nearest hit of `ray` on the mesh geometry. Calls the geometric raycast
+ * directly: the scene swaps an inactive model's `raycast` for a shim that
+ * returns nothing while the dimmed ghost is close to the camera, which made
+ * seating checks on non-selected models depend on where the camera was.
+ */
+function firstHit(ray: THREE.Raycaster, mesh: THREE.Mesh): THREE.Intersection | null {
+    const hits: THREE.Intersection[] = [];
+    THREE.Mesh.prototype.raycast.call(mesh, ray, hits);
+    if (hits.length === 0) return null;
+    let best = hits[0];
+    for (const h of hits) if (h.distance < best.distance) best = h;
+    return best;
+}
+
 /** Surface hit along `axis` (into the part) through `p`, or null. */
 function surfaceAlong(p: V3, axis: V3, mesh: THREE.Mesh, back: number, reach: number): THREE.Intersection | null {
     _seatRay.set(new THREE.Vector3(p.x - axis.x * back, p.y - axis.y * back, p.z - axis.z * back), new THREE.Vector3(axis.x, axis.y, axis.z));
     _seatRay.far = back + reach;
-    return _seatRay.intersectObject(mesh, false)[0] ?? null;
+    return firstHit(_seatRay, mesh);
 }
 
 /** Ring samples around the tip: which ones find the surface near the contact plane. */
@@ -75,7 +90,7 @@ function cornerBisector(tip: V3, normal: V3, mesh: THREE.Mesh): V3 | null {
     for (const d of dirs) {
         _seatRay.set(target.clone().addScaledVector(d, 0.7), d.clone().negate());
         _seatRay.far = 0.8;
-        const h = _seatRay.intersectObject(mesh, false)[0];
+        const h = firstHit(_seatRay, mesh);
         if (!h?.face) continue;
         if (Math.hypot(h.point.x - tip.x, h.point.y - tip.y, h.point.z - tip.z) > 0.3) continue; // another feature
         const fn = h.face.normal.clone().transformDirection(mesh.matrixWorld);
