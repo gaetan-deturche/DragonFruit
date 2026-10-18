@@ -6,7 +6,7 @@ function round2(v: number): number { return Math.round(v * 100) / 100; }
 import type { AutoSupportSettings } from './settings';
 import { normalizeAutoSupportSettings } from './settings';
 import { generateCandidates, deduplicateCandidates } from './candidateGeneration';
-import { sizeParameters, requiredTipContactDiameterMm } from './parameterSizing';
+import { sizeParameters, requiredTipContactDiameterMm, MIN_TIP_CONTACT_MM } from './parameterSizing';
 import type { ModelSizingContext } from './parameterSizing';
 import { getSettings } from '../Settings/state';
 import { getSnapshot, addRoot, addTrunk, addBranch, addLeaf, addKnot, addAnchor, addStick, addTwig } from '../state';
@@ -1119,10 +1119,12 @@ export function runAutoPlace(
         modelCtx.maxCrossSectionMm2 = computeMaxCrossSectionMm2(mesh);
         // Not every candidate ends up placed (rejects, merges): count on
         // about half of them actually holding the part (the hollow sides: 142/286).
-        modelCtx.minTipContactMm = requiredTipContactDiameterMm(
+        // Never below the absolute tip floor: leaves take their contact from
+        // this, and a light part (the saint: 0.27 mm) left them under it.
+        modelCtx.minTipContactMm = Math.max(MIN_TIP_CONTACT_MM, requiredTipContactDiameterMm(
             modelCtx.maxCrossSectionMm2,
             Math.max(8, candidates.length * EXPECTED_PLACED_FRACTION),
-        );
+        ));
     }
 
     let placedTrunks = 0;

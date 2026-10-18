@@ -10,11 +10,11 @@ const candidate = (zHeight: number, islandAreaMm2 = 1): CandidatePoint => ({
 
 const ctx: ModelSizingContext = { modelVolumeMm3: 27000, modelZMaxMm: 116, totalCandidates: 280, candidatesBelowZ: 100 };
 
-test('tall trunks get a stiffness floor, short ones stay thin', () => {
+test('tall trunks get a stiffness floor, short ones keep the 1.2 mm floor', () => {
     const short = sizeParameters(candidate(10), ctx).shaftDiameterMm!;
     const mid = sizeParameters(candidate(50), ctx).shaftDiameterMm!;
     const tall = sizeParameters(candidate(100), ctx).shaftDiameterMm!;
-    assert.ok(short <= 0.85, `short ${short}`);
+    assert.ok(short >= 1.2 - 1e-6 && short <= 1.25, `short ${short}`);
     assert.ok(mid >= 1.25, `mid ${mid}`);
     assert.ok(tall >= 2.0 && tall <= 2.5, `tall ${tall}`);
     // Slenderness of the shaft itself stays bounded.
@@ -45,21 +45,21 @@ test('tip minimum covers the largest layer peel', () => {
     const d = requiredTipContactDiameterMm(516, 170);
     const total = 170 * Math.PI * (d / 2) ** 2;
     assert.ok(total >= (516 * 0.2 * 4) / 10 - 1e-6, `total ${total}`);
-    assert.ok(d > 0.45 && d <= 0.6, `d ${d}`);
-    assert.equal(requiredTipContactDiameterMm(5000, 10), 0.6); // capped
+    assert.ok(d > 0.45 && d <= 0.7, `d ${d}`);
+    assert.equal(requiredTipContactDiameterMm(5000, 10), 0.7); // capped
     assert.equal(requiredTipContactDiameterMm(0, 10), 0);
 });
 
 test('model tip minimum raises the contact, within the shaft', () => {
     const base = sizeParameters(candidate(20), ctx).tipContactDiameterMm!;
-    const raised = sizeParameters(candidate(20), { ...ctx, minTipContactMm: 0.55 });
-    assert.ok(base < 0.55, `base ${base}`);
-    assert.ok(raised.tipContactDiameterMm! >= 0.55 - 1e-6, `raised ${raised.tipContactDiameterMm}`);
+    const raised = sizeParameters(candidate(20), { ...ctx, minTipContactMm: 0.7 });
+    assert.ok(base < 0.7, `base ${base}`);
+    assert.ok(raised.tipContactDiameterMm! >= 0.7 - 1e-6, `raised ${raised.tipContactDiameterMm}`);
     assert.ok(raised.tipContactDiameterMm! <= raised.shaftDiameterMm! * 0.8 + 1e-6);
 });
 
-test('no auto tip below 0.45 mm, sunk at least 0.2 mm', () => {
+test('no auto tip below 0.6 mm, sunk at least 0.2 mm', () => {
     const tiny = sizeParameters(candidate(5, 0.01), { ...ctx, minTipContactMm: 0.1 });
-    assert.ok(tiny.tipContactDiameterMm! >= 0.45 - 1e-6, `tip ${tiny.tipContactDiameterMm}`);
+    assert.ok(tiny.tipContactDiameterMm! >= 0.6 - 1e-6, `tip ${tiny.tipContactDiameterMm}`);
     assert.ok(tiny.tipPenetrationMm! >= 0.2 - 1e-6, `pen ${tiny.tipPenetrationMm}`);
 });

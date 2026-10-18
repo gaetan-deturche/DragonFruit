@@ -10,9 +10,12 @@ const RESIN_DENSITY_G_PER_MM3 = 0.0011;
 /** Approximate peel force per mm² of cross-section (N/mm²).
  *  Real measured values are 0.1–0.5 N/mm² for typical resins. */
 const PEEL_FORCE_N_PER_MM2 = 0.2;
-/** Base shaft diameter floor (mm).  Supports thinner than this
- *  are too fragile for any practical load. */
-const MIN_SHAFT_DIAMETER_MM = 0.75;
+/** Base shaft diameter floor (mm). Measured on Chitubox slices of the same
+ *  parts that printed fine: shafts 1.4-1.8 mm median, ~1.0 mm for the thinnest
+ *  10 %. Ours sat at 0.8 mm on light parts (sized from their small load) and
+ *  snapped mid-height at every peel: green resin is brittle and peel also
+ *  pulls sideways, neither of which the tension sizing below accounts for. */
+const MIN_SHAFT_DIAMETER_MM = 1.2;
 /** Maximum shaft diameter (mm). */
 const MAX_SHAFT_DIAMETER_MM = 2.5;
 /** Tensile strength of freshly printed (green, not post-cured) standard resin,
@@ -40,14 +43,14 @@ const LAYER_PEEL_N_PER_MM2 = 0.2;
 const TIP_SAFETY_FACTOR = 4;
 /** Upper bound for the model-level tip minimum: bigger contacts scar details, and
  *  past ~0.5 mm the tip disk no longer clears sloped surfaces (trunk builds fail). */
-const MAX_REQUIRED_TIP_MM = 0.6;
+const MAX_REQUIRED_TIP_MM = 0.7;
 /**
  * Absolute floor for an auto-placed contact. 0.24 mm tips (5 LCD pixels) held
  * nothing in practice, even on a small 42 mm² part. A Chitubox slice of the
  * same parts that printed fine had its thinnest 10 % of junctions at
  * 0.28-0.47 mm and a 0.66-0.69 mm median.
  */
-const MIN_TIP_CONTACT_MM = 0.45;
+export const MIN_TIP_CONTACT_MM = 0.6;
 /** Minimum depth a tip is sunk into the part (mm): ~4 layers at 0.05 mm. */
 const MIN_TIP_PENETRATION_MM = 0.2;
 
