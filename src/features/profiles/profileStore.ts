@@ -840,8 +840,29 @@ const BUILTIN_PRINTER_PRESETS: PrinterPreset[] = (printerPresetsData as PrinterP
 
 const BUILTIN_MATERIAL_TEMPLATES = materialTemplatesData as MaterialTemplate[];
 
+/**
+ * Fork-side corrections to upstream plugin presets (the plugins are upstream
+ * submodules). Photon Mono X2: the slicer writes a top view of each layer, but
+ * the part hangs upside down under the plate, so the image must be mirrored —
+ * a test print came out as the mirror image of the model (the altar saint held
+ * the sword in the wrong hand), while Chitubox files for the same printer print
+ * the right way round.
+ */
+const PRESET_DISPLAY_CORRECTIONS: Record<string, { mirrorX?: boolean; mirrorY?: boolean }> = {
+    'anycubic-photon-mono-x2-pmx2': { mirrorX: true },
+};
+
+function presetDisplayCorrection(presetId: string | null | undefined): { mirrorX?: boolean; mirrorY?: boolean } | undefined {
+    return presetId ? PRESET_DISPLAY_CORRECTIONS[presetId] : undefined;
+}
+
+function correctPresetDisplay(preset: PrinterPreset): PrinterPreset {
+    const fix = presetDisplayCorrection(preset.presetId);
+    return fix ? { ...preset, display: { ...preset.display, ...fix } } : preset;
+}
+
 function getAllPrinterPresets(): PrinterPreset[] {
-    return getRuntimePrinterPresets(BUILTIN_PRINTER_PRESETS);
+    return getRuntimePrinterPresets(BUILTIN_PRINTER_PRESETS).map(correctPresetDisplay);
 }
 
 function getAllMaterialTemplates(): MaterialTemplate[] {
@@ -1100,8 +1121,12 @@ function sanitizeState(input: Partial<ProfileStoreState> | null | undefined): Pr
                             ?? (fallbackDisplay as { webcamOrientation?: unknown } | undefined)?.webcamOrientation,
                             DEFAULT_WEBCAM_ROTATION_DEG,
                         ),
-                        mirrorX: normalizeMirrorFlag(rawDisplay?.mirrorX, normalizeMirrorFlag(fallbackDisplay?.mirrorX, false)),
-                        mirrorY: normalizeMirrorFlag(rawDisplay?.mirrorY, normalizeMirrorFlag(fallbackDisplay?.mirrorY, false)),
+                        // A corrected official preset wins over the flag saved
+                        // from the uncorrected one.
+                        mirrorX: presetDisplayCorrection(officialPresetId)?.mirrorX
+                            ?? normalizeMirrorFlag(rawDisplay?.mirrorX, normalizeMirrorFlag(fallbackDisplay?.mirrorX, false)),
+                        mirrorY: presetDisplayCorrection(officialPresetId)?.mirrorY
+                            ?? normalizeMirrorFlag(rawDisplay?.mirrorY, normalizeMirrorFlag(fallbackDisplay?.mirrorY, false)),
                     },
                     network: networkProfileState.network,
                     networkFleet: networkProfileState.networkFleet,
