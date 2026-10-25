@@ -57,6 +57,48 @@ const SUPPORT_AUTO_PLACE = 'support:auto-place' as const;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** An island resting on nothing prints its first layers in the void: farther
+ *  than this from any support tip they sag or tear off and the part loses that
+ *  corner (a gun holder's bottom edge hung 2.9 mm free and never formed). */
+const UNSUPPORTED_ISLAND_REACH_MM = 1.0;
+/** Islands this small fuse into their neighbours before they can sag. */
+const UNSUPPORTED_ISLAND_MIN_AREA_MM2 = 0.05;
+/** Islands within this height of the part's lowest point are its first layers. */
+const LOWEST_POINT_BAND_MM = 0.3;
+
+/**
+ * Warnings for islands the placement left without a support: the part's
+ * starting point (its lowest island) always, any other island only when it is
+ * far from every support tip. Shown in the auto-support panel and returned in
+ * the result, so a part that cannot start cleanly is not exported silently.
+ */
+export function unsupportedIslandWarnings(uncovered: DetectedIsland[], modelId: string): string[] {
+    if (uncovered.length === 0) return [];
+    const mesh = getModelMesh(modelId);
+    const minZ = mesh ? new THREE.Box3().setFromObject(mesh).min.z : -Infinity;
+    const snap = getSnapshot();
+    const tips: Array<{ x: number; y: number; z: number }> = [];
+    for (const t of Object.values(snap.trunks)) if (t.modelId === modelId && t.contactCone) tips.push(t.contactCone.pos);
+    for (const b of Object.values(snap.branches)) if (b.modelId === modelId && b.contactCone) tips.push(b.contactCone.pos);
+    for (const l of Object.values(snap.leaves)) if (l.modelId === modelId) tips.push(l.contactCone.pos);
+    for (const a of Object.values(snap.anchors)) if (a.modelId === modelId) tips.push(a.contactCone.pos);
+    const warnings: string[] = [];
+    for (const island of uncovered) {
+        const c = island.contact;
+        const area = island.areaMm2 ?? 0;
+        let nearest = Infinity;
+        for (const p of tips) nearest = Math.min(nearest, Math.hypot(p.x - c.x, p.y - c.y, p.z - c.z));
+        const where = `(${c.x.toFixed(1)}, ${c.y.toFixed(1)}, ${c.z.toFixed(1)})`;
+        const reach = Number.isFinite(nearest) ? `${nearest.toFixed(1)} mm` : 'no support';
+        if (c.z - minZ <= LOWEST_POINT_BAND_MM) {
+            warnings.push(`The part's starting point at ${where} has no support of its own (nearest tip: ${reach}); its first layers may sag or tear off.`);
+        } else if (area >= UNSUPPORTED_ISLAND_MIN_AREA_MM2 && nearest > UNSUPPORTED_ISLAND_REACH_MM) {
+            warnings.push(`Unsupported island of ${area.toFixed(2)} mm² at ${where}, ${reach} from the nearest support tip.`);
+        }
+    }
+    return warnings;
+}
+
 function makeResult(
     trunks: number,
     anchors: number,
@@ -1616,6 +1658,9 @@ export function runAutoPlace(
             })),
     };
 
+    analytics.warnings = unsupportedIslandWarnings(islands.filter(i => !supportedIds.has(i.id)), modelId);
+    for (const w of analytics.warnings) console.warn(LOG_PREFIX, w);
+
     // ------------------------------------------------------------------
     // 4. Auto-bracing + history
     // ------------------------------------------------------------------
@@ -1657,7 +1702,8 @@ export function runAutoPlace(
             rejectedCount,
             changed,
             `Placed ${placedTrunks} trunks, ${placedAnchors} anchors, ${placedBranches} branches, ${placedLeaves} leaves, ${placedSticks} sticks. ` +
-            `${rejectedCount} rejected. Coverage: ${analytics.islandsCovered}/${islands.length} islands (${(analytics.areaCoverage * 100).toFixed(0)}%).`,
+            `${rejectedCount} rejected. Coverage: ${analytics.islandsCovered}/${islands.length} islands (${(analytics.areaCoverage * 100).toFixed(0)}%).` +
+            (analytics.warnings.length ? ` WARNING: ${analytics.warnings.join(' ')}` : ''),
         ),
         analytics,
     };

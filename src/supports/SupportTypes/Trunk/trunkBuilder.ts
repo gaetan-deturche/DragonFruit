@@ -334,20 +334,43 @@ export function buildEscapeTrunkData(input: TrunkBuildInput): TrunkBuildResult {
     const fail = (): TrunkBuildResult =>
         buildTrunkDataFromPlacement(input, { ...base, error: 'COLLISION_WITH_MODEL' });
 
-    // Horizontal escape direction = outward-facing part of the surface normal.
-    const hLen = Math.hypot(tipNormal.x, tipNormal.y);
     const runZ = socketPos.z - rootsTopZ; // vertical rise available to tilt over
-    if (!mesh || hLen < 1e-3 || runZ < 2) {
-        // Near-vertical normal or too little height to tilt into — escape can't help.
-        return fail();
-    }
-    const hx = tipNormal.x / hLen;
-    const hy = tipNormal.y / hLen;
-
+    if (!mesh || runZ <= 0) return fail();
     const clearanceR = shaftRadius + 0.2;
+
+    // A plain vertical shaft straight under the socket, built without the grid
+    // pathfinder. The lowest point of a part (its first printed layer) faces
+    // straight down, and the routed trunk could still be refused there — the
+    // gun holders' bottom edge was left with no support at all, its first
+    // layers hung free and that corner never formed.
+    const straightBottom: Vec3 = { x: socketPos.x, y: socketPos.y, z: rootsTopZ };
+    if (isRootWithinPlate(straightBottom.x, straightBottom.y)
+        && !isShaftBlocked(straightBottom, socketPos, clearanceR, mesh)) {
+        const basePos: Vec3 = { x: straightBottom.x, y: straightBottom.y, z: 0 };
+        return buildTrunkDataFromPlacement(input, {
+            basePos,
+            socketPos,
+            unsnappedBottomPos: basePos,
+            snappedNodeKey: null,
+            joints: [],
+            constructionJoints: [],
+            error: undefined,
+            warning: base.warning,
+            angle: base.angle,
+            coneAxis: base.coneAxis,
+        });
+    }
+    if (runZ < 2) return fail();
+
+    // Horizontal escape direction = outward-facing part of the surface normal;
+    // a straight-down normal has none, so fan out over the compass instead.
+    const hLen = Math.hypot(tipNormal.x, tipNormal.y);
+    const hx = hLen >= 1e-3 ? tipNormal.x / hLen : 1;
+    const hy = hLen >= 1e-3 ? tipNormal.y / hLen : 0;
+
     // Steep tilts only: a strongly leaning shaft flexes under every peel.
     const TILTS_DEG = ESCAPE_TRUNK_TILTS_DEG;
-    const YAWS_DEG = [0, 22, -22, 44, -44];
+    const YAWS_DEG = hLen >= 1e-3 ? [0, 22, -22, 44, -44] : [0, 45, 90, 135, 180, 225, 270, 315];
 
     for (const tiltDeg of TILTS_DEG) {
         const offset = runZ * Math.tan((tiltDeg * Math.PI) / 180);

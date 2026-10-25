@@ -128,6 +128,8 @@ export function AutoSupportPanel({ islands, hasGeometry, activeModelId }: AutoSu
   const [showReplaceDialog, setShowReplaceDialog] = React.useState(false);
   const [showSizingDebug, setShowSizingDebug] = React.useState(false);
   const [sizingDebug, setSizingDebugState] = React.useState<SizingDebugInfo | null>(null);
+  // Islands the last run could not support where it matters (see runAutoPlace).
+  const [placementWarnings, setPlacementWarnings] = React.useState<string[]>([]);
   const [activePreset, setActivePreset] = React.useState<string | null>('medium');
 
   const settings = getSettings().autoSupport;
@@ -160,7 +162,7 @@ export function AutoSupportPanel({ islands, hasGeometry, activeModelId }: AutoSu
     if (list.length > 0 && s.autoSupport.enabled) {
       try {
         const result = runAutoPlace(list, activeModelId!, s.autoSupport);
-        if (result.analytics?.sizingDebug) setSizingDebugState(result.analytics.sizingDebug);
+        if (result.analytics?.sizingDebug) setSizingDebugState(result.analytics.sizingDebug); setPlacementWarnings(result.analytics?.warnings ?? []);
       } finally {
         setAutoSupportBusy(false);
         setBusy(false);
@@ -225,7 +227,7 @@ export function AutoSupportPanel({ islands, hasGeometry, activeModelId }: AutoSu
               const list = islandsRef.current.filteredIslands;
               if (list.length > 0 && s.autoSupport.enabled) {
                 const result = runAutoPlace(list, activeModelId, s.autoSupport);
-                if (result.analytics?.sizingDebug) setSizingDebugState(result.analytics.sizingDebug);
+                if (result.analytics?.sizingDebug) setSizingDebugState(result.analytics.sizingDebug); setPlacementWarnings(result.analytics?.warnings ?? []);
               }
             } finally {
               setAutoSupportBusy(false);
@@ -254,7 +256,7 @@ export function AutoSupportPanel({ islands, hasGeometry, activeModelId }: AutoSu
           const s = getSettings();
           if (list.length > 0 && s.autoSupport.enabled) {
             const result = runAutoPlace(list, activeModelId, s.autoSupport);
-            if (result.analytics?.sizingDebug) setSizingDebugState(result.analytics.sizingDebug);
+            if (result.analytics?.sizingDebug) setSizingDebugState(result.analytics.sizingDebug); setPlacementWarnings(result.analytics?.warnings ?? []);
           }
         } finally {
           setAutoSupportBusy(false);
@@ -338,6 +340,21 @@ export function AutoSupportPanel({ islands, hasGeometry, activeModelId }: AutoSu
             >
               {busy ? 'Running…' : 'Generate Supports'}
             </button>
+
+            {placementWarnings.length > 0 && (
+              <div
+                role="alert"
+                className="rounded-md border p-2 space-y-1 text-[11px]"
+                style={{
+                  borderColor: 'var(--warning, #d97706)',
+                  background: 'color-mix(in srgb, var(--warning, #d97706), var(--surface-0) 88%)',
+                  color: 'var(--text-strong)',
+                }}
+              >
+                <div className="font-semibold">Unsupported start / islands</div>
+                {placementWarnings.map((w, i) => <div key={i}>{w}</div>)}
+              </div>
+            )}
 
             {/* Island counts */}
             <div className="rounded-md border p-2" style={SECTION_CARD}>
